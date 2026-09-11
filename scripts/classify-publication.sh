@@ -28,6 +28,11 @@ mode_for_paths() {
   local mode=none
   local path
 
+  # ponytail: this explicit list is intentionally reviewable, but it is a
+  # known ceiling. Any new Docker build-context or public tag input (for
+  # example supported_bases.json, distro variants, or architecture-specific
+  # files) must be added here, to mode_for_diff, and to a regression test in
+  # the same PR; a prior .dockerignore change cannot discover later edits.
   for path in "$@"; do
     case "$path" in
       Dockerfile|.dockerignore|scripts/image-metadata.sh)
