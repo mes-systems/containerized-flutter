@@ -33,7 +33,6 @@ for filter in \
   '.supported_versions = []' \
   '.support_policy.minor_lines = 1' \
   '.supported_versions[1].version = .supported_versions[0].version' \
-  '.supported_versions[1].version = "3.44.3" | .supported_versions[1].archive = "stable/linux/flutter_linux_3.44.3-stable.tar.xz"' \
   '.supported_versions[0].version = ""' \
   '.supported_versions[0].channel = "beta"' \
   '.supported_versions[0].revision = "not-a-revision"'
@@ -41,6 +40,33 @@ do
   jq "$filter" "$manifest" > "$test_dir/invalid.json"
   assert_fails "$validator" "$test_dir/invalid.json"
 done
+
+mutated_version="$(jq -er '
+  .supported_versions[0].version
+  | split(".")
+  | "\(.[0]).\(.[1]).\((.[2] | tonumber) + 1)"
+' "$manifest")"
+jq --arg new_version "$mutated_version" '
+  .supported_versions[0] as $base
+  | if (.supported_versions | length) >= 2 then
+      .supported_versions[1] = (
+        .supported_versions[1]
+        | .version = $new_version
+        | .archive = (.channel + "/linux/flutter_linux_" + $new_version + "-" + .channel + ".tar.xz")
+      )
+    else
+      .supported_versions += [
+        ($base
+         | .version = $new_version
+         | .archive = (.channel + "/linux/flutter_linux_" + $new_version + "-" + .channel + ".tar.xz"))
+      ]
+    end
+' "$manifest" > "$test_dir/duplicate-minor.json"
+duplicate_minor_output="$test_dir/duplicate-minor.out"
+if "$validator" "$test_dir/duplicate-minor.json" > "$duplicate_minor_output" 2>&1; then
+  fail 'validator accepted duplicate Flutter minor line'
+fi
+assert_contains 'duplicate Flutter minor line' "$(< "$duplicate_minor_output")"
 
 from_line="$(awk '$1 == "FROM" { print; count++ } END { if (count != 1) exit 1 }' \
   "$ROOT_DIR/Dockerfile")" || fail 'Dockerfile must have one FROM line'
