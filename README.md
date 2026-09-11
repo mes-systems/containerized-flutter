@@ -167,7 +167,7 @@ The watcher requires a repository Environment named `flutter-release-watcher`.
 Configure it for the `main` branch/ref with no required reviewer; the workflow
 sets `deployment: false` because it is not a deployment workflow. Add only:
 
-- Environment variable: `FLUTTER_WATCHER_APP_ID`
+- Environment variable: `FLUTTER_WATCHER_CLIENT_ID`
 - Environment secret: `FLUTTER_WATCHER_PRIVATE_KEY`
 
 Install the dedicated least-privilege GitHub App with Metadata read, Contents

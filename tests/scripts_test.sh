@@ -231,11 +231,11 @@ assert_contains 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996d
 assert_contains 'environment:' "$watcher_source"
 assert_contains 'name: flutter-release-watcher' "$watcher_source"
 assert_contains 'deployment: false' "$watcher_source"
-assert_contains 'app-id: ${{ vars.FLUTTER_WATCHER_APP_ID }}' "$watcher_source"
+assert_contains 'client-id: ${{ vars.FLUTTER_WATCHER_CLIENT_ID }}' "$watcher_source"
 assert_contains 'private-key: ${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}' "$watcher_source"
 assert_contains 'security_anomaly' "$watcher_source"
 assert_contains 'Configure it for the `main` branch/ref with no required reviewer' "$(< "$ROOT_DIR/README.md")"
-if rg -n 'secrets\.FLUTTER_WATCHER_APP_ID|peter-evans|create-pull-request|github-actions-create-pr|secrets\.PAT|secrets\.GH_TOKEN' \
+if rg -n 'secrets\.FLUTTER_WATCHER_(APP|CLIENT)_ID|app-id:|peter-evans|create-pull-request|github-actions-create-pr|secrets\.PAT|secrets\.GH_TOKEN' \
   <<< "$watcher_source"; then
   fail 'watcher must use the dedicated GitHub App token, not a PAT or third-party PR action'
 fi
