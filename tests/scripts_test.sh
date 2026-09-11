@@ -169,6 +169,9 @@ assert_contains '.pull_request.head.sha' "$ci_source"
 assert_contains 'if: needs.manifest.outputs.requires_toolchain_ci == '\''true'\''' "$ci_source"
 assert_contains 'name: CI gate' "$ci_source"
 assert_contains 'if: always()' "$ci_source"
+if rg -n 'ref:.*pull_request\.head\.sha' <<< "$ci_source"; then
+  fail 'manifest validation must use the merge checkout, not the PR head'
+fi
 if rg -n 'paths-ignore:' <<< "$ci_source"; then
   fail 'CI must not be skipped at the event level'
 fi
