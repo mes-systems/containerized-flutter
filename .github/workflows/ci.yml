@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  manifest:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Validate version manifest
+        run: scripts/validate-versions.sh versions.json
+
+      - name: Run script guardrails
+        run: tests/scripts_test.sh
+
+      - name: Build version matrix
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix="$(jq -c '{include: [.versions[] | {version, channel, revision, archive, archive_sha256}]}' versions.json)"
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: manifest
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.manifest.outputs.matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Acquire Flutter release
+        run: |
+          set -euo pipefail
+          scripts/acquire-flutter.sh "${{ matrix.version }}" "${{ matrix.channel }}" .artifacts
+
+      - name: Verify Flutter release
+        id: verify
+        run: |
+          set -euo pipefail
+          scripts/verify-release.sh \
+            "${{ matrix.version }}" \
+            "${{ matrix.channel }}" \
+            "${{ matrix.revision }}" \
+            "${{ matrix.archive_sha256 }}" \
+            .artifacts/flutter-sdk.tar.xz
+
+      - name: Derive image metadata
+        id: metadata
+        run: scripts/image-metadata.sh "${{ matrix.version }}" "${{ github.sha }}" Dockerfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }}
+          cache-from: type=gha,scope=flutter-${{ matrix.version }}
+          cache-to: type=gha,mode=max,scope=flutter-${{ matrix.version }}
+          build-args: |
+            FLUTTER_VERSION=${{ matrix.version }}
+            FLUTTER_CHANNEL=${{ matrix.channel }}
+            FLUTTER_REVISION=${{ matrix.revision }}
+            FLUTTER_ARCHIVE_SHA256=${{ steps.verify.outputs.archive_sha256 }}
+            SOURCE_REVISION=${{ github.sha }}
+
+      - name: Smoke test image
+        run: |
+          set -euo pipefail
+          scripts/smoke-test.sh \
+            ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }} \
+            "${{ matrix.version }}" \
+            "${{ matrix.revision }}"
