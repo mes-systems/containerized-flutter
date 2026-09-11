@@ -51,7 +51,8 @@ releases.
 
 | Flutter | Channel | Git revision | SDK archive SHA256 |
 | --- | --- | --- | --- |
-| 3.44.2 | stable | `c9a6c484230f8b5e408ec57be1ef71dee1e77020` | `b0de1d19754688ec6769c9a067db3b0594479d3d767f971bfecfc132904c8d5e` |
+| 3.41.9 | stable | `00b0c91f06209d9e4a41f71b7a512d6eb3b9c694` | `cf2631dde02570733921a530f47a96abe896b5e334682d2743c29530ea88bb2e` |
+| 3.44.9 | stable | `6b182d2c7585eba26d4edce0f97630effd256c33` | `a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb` |
 | 3.47.3 | stable | `e8113bf45620cbeb8aff64947ee4c93e16adb4cf` | `988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1` |
 
 The initial image target is Linux amd64 only.
