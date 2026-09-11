@@ -12,10 +12,13 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      requires_toolchain_ci: ${{ steps.classify.outputs.requires_toolchain_ci }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Validate supported version manifest
@@ -23,6 +26,28 @@ jobs:
 
       - name: Run script guardrails
         run: tests/scripts_test.sh
+
+      - name: Classify changed files
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            printf 'requires_toolchain_ci=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base_sha="$(jq -er '.pull_request.base.sha' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
+          head_sha="$(jq -er '.pull_request.head.sha' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
+          if [[ ! "$base_sha" =~ ^[[:xdigit:]]{40}$ || ! "$head_sha" =~ ^[[:xdigit:]]{40}$ ]]; then
+            printf 'requires_toolchain_ci=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags origin "$base_sha" "$head_sha" >/dev/null 2>&1 || true
+          scripts/classify-changes.sh --revisions "$base_sha" "$head_sha" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Build supported version matrix
         id: matrix
@@ -34,6 +59,7 @@ jobs:
 
   build:
     needs: manifest
+    if: needs.manifest.outputs.requires_toolchain_ci == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -93,3 +119,41 @@ jobs:
             ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }} \
             "${{ matrix.version }}" \
             "${{ matrix.revision }}"
+
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [manifest, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Evaluate CI results
+        env:
+          MANIFEST_RESULT: ${{ needs.manifest.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          REQUIRES_TOOLCHAIN_CI: ${{ needs.manifest.outputs.requires_toolchain_ci }}
+        run: |
+          set -euo pipefail
+
+          [[ "$MANIFEST_RESULT" == "success" ]] || {
+            printf 'manifest result was %s\n' "$MANIFEST_RESULT" >&2
+            exit 1
+          }
+
+          case "$REQUIRES_TOOLCHAIN_CI" in
+            true)
+              [[ "$BUILD_RESULT" == "success" ]] || {
+                printf 'required toolchain CI result was %s\n' "$BUILD_RESULT" >&2
+                exit 1
+              }
+              ;;
+            false)
+              [[ "$BUILD_RESULT" == "skipped" ]] || {
+                printf 'unexpected skipped-matrix result: %s\n' "$BUILD_RESULT" >&2
+                exit 1
+              }
+              ;;
+            *)
+              printf 'invalid toolchain CI classification: %s\n' "$REQUIRES_TOOLCHAIN_CI" >&2
+              exit 1
+              ;;
+          esac

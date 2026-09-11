@@ -160,3 +160,12 @@ Dependabot checks the pinned Ubuntu 24.04 Docker digest weekly. When Ubuntu
 changes, its short digest changes the public image tags, while previous tags
 and OCI digests remain addressable. Dependabot also checks pinned GitHub
 Actions revisions weekly.
+
+## CI and maintenance
+
+Documentation-only changes run the lightweight manifest and script validation
+but do not rebuild the supported Flutter matrix. The shared change classifier
+allows this only when every changed path is explicitly harmless; any unknown or
+toolchain-relevant path defaults to full validation. Manual workflow dispatch
+can force the full matrix, and a main-branch publication follows the same
+classification before pushing or attesting images.

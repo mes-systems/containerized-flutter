@@ -22,11 +22,58 @@ assert_fails() {
 
 manifest="$ROOT_DIR/supported_version.json"
 validator="$ROOT_DIR/scripts/validate-supported-versions.sh"
+classifier="$ROOT_DIR/scripts/classify-changes.sh"
 
 "$validator" "$manifest"
 
+assert_classification() {
+  local expected="$1"
+  shift
+  local actual
+  actual="$("$classifier" "$@")"
+  [[ "$actual" == "requires_toolchain_ci=$expected" ]] \
+    || fail "expected requires_toolchain_ci=$expected, got: $actual"
+}
+
+assert_classification false README.md
+assert_classification false README.md SECURITY.md
+assert_classification false docs/maintenance.md
+assert_classification true README.md Dockerfile
+assert_classification true README.md supported_version.json
+assert_classification true README.md scripts/verify-release.sh
+assert_classification true README.md tests/smoke_app/test/smoke_test.dart
+assert_classification true some-new-future-file
+assert_classification true
+assert_classification true --revisions not-a-base not-a-head
+
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "$test_dir"' EXIT
+
+fixture_repo="$test_dir/classifier-repo"
+git init -q "$fixture_repo"
+git -C "$fixture_repo" config user.name classifier-test
+git -C "$fixture_repo" config user.email classifier-test@example.invalid
+printf 'docs\n' > "$fixture_repo/README.md"
+git -C "$fixture_repo" add README.md
+git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: initial harmless file'
+fixture_base="$(git -C "$fixture_repo" rev-parse HEAD)"
+printf 'license\n' > "$fixture_repo/LICENSE"
+git -C "$fixture_repo" add LICENSE
+git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add harmless file'
+fixture_docs_head="$(git -C "$fixture_repo" rev-parse HEAD)"
+fixture_docs_result="$(cd "$fixture_repo" && "$classifier" --revisions \
+  "$fixture_base" "$fixture_docs_head")"
+[[ "$fixture_docs_result" == 'requires_toolchain_ci=false' ]] \
+  || fail "expected harmless revision range to skip toolchain CI, got: $fixture_docs_result"
+printf 'FROM ubuntu:24.04\n' > "$fixture_repo/Dockerfile"
+git -C "$fixture_repo" add Dockerfile
+git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add toolchain file'
+fixture_toolchain_head="$(git -C "$fixture_repo" rev-parse HEAD)"
+fixture_toolchain_result="$(cd "$fixture_repo" && "$classifier" --revisions \
+  "$fixture_base" "$fixture_toolchain_head")"
+[[ "$fixture_toolchain_result" == 'requires_toolchain_ci=true' ]] \
+  || fail "expected toolchain revision range to require CI, got: $fixture_toolchain_result"
+
 for filter in \
   '.schema = 2' \
   '.support_policy.selection = "all_releases"' \
@@ -114,5 +161,21 @@ assert_contains 'docker image inspect' "$publish_source"
 assert_contains '.RepoDigests' "$publish_source"
 assert_contains 'provenance: false' "$(sed -n '1,240p' "$ROOT_DIR/.github/workflows/ci.yml")"
 assert_contains 'push-to-registry: true' "$publish_source"
+
+ci_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/ci.yml")"
+assert_contains 'scripts/classify-changes.sh --revisions' "$ci_source"
+assert_contains '.pull_request.base.sha' "$ci_source"
+assert_contains '.pull_request.head.sha' "$ci_source"
+assert_contains 'if: needs.manifest.outputs.requires_toolchain_ci == '\''true'\''' "$ci_source"
+assert_contains 'name: CI gate' "$ci_source"
+assert_contains 'if: always()' "$ci_source"
+if rg -n 'paths-ignore:' <<< "$ci_source"; then
+  fail 'CI must not be skipped at the event level'
+fi
+
+assert_contains 'scripts/classify-changes.sh --revisions' "$publish_source"
+assert_contains '.before' "$publish_source"
+assert_contains '.after' "$publish_source"
+assert_contains 'github.event_name == '\''workflow_dispatch'\''' "$publish_source"
 
 printf 'PASS: script and supply-chain guardrails\n'
