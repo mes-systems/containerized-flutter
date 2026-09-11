@@ -24,24 +24,45 @@ fail() {
   exit 1
 }
 
+# ponytail: this explicit policy is intentionally reviewable, but it is a
+# known ceiling. Any new Docker build-context or public tag input (for
+# example supported_bases.json, distro variants, or architecture-specific
+# files) must be added here and covered by a regression test in the same PR;
+# a prior .dockerignore change cannot discover later edits to that input.
+classify_path() {
+  case "$1" in
+    Dockerfile|.dockerignore|scripts/image-metadata.sh)
+      printf 'full\n'
+      ;;
+    supported_version.json)
+      printf 'selective\n'
+      ;;
+    *)
+      printf 'none\n'
+      ;;
+  esac
+}
+
+merge_mode() {
+  case "$1:$2" in
+    full:*|*:full)
+      printf 'full\n'
+      ;;
+    selective:*|*:selective)
+      printf 'selective\n'
+      ;;
+    *)
+      printf 'none\n'
+      ;;
+  esac
+}
+
 mode_for_paths() {
   local mode=none
   local path
 
-  # ponytail: this explicit list is intentionally reviewable, but it is a
-  # known ceiling. Any new Docker build-context or public tag input (for
-  # example supported_bases.json, distro variants, or architecture-specific
-  # files) must be added here, to mode_for_diff, and to a regression test in
-  # the same PR; a prior .dockerignore change cannot discover later edits.
   for path in "$@"; do
-    case "$path" in
-      Dockerfile|.dockerignore|scripts/image-metadata.sh)
-        mode=full
-        ;;
-      supported_version.json)
-        [[ "$mode" == none ]] && mode=selective
-        ;;
-    esac
+    mode="$(merge_mode "$mode" "$(classify_path "$path")")"
   done
 
   printf '%s\n' "$mode"
@@ -52,14 +73,7 @@ mode_for_diff() {
   local mode=none
 
   while IFS= read -r -d '' path; do
-    case "$path" in
-      Dockerfile|.dockerignore|scripts/image-metadata.sh)
-        mode=full
-        ;;
-      supported_version.json)
-        [[ "$mode" == none ]] && mode=selective
-        ;;
-    esac
+    mode="$(merge_mode "$mode" "$(classify_path "$path")")"
   done < "$1"
 
   printf '%s\n' "$mode"

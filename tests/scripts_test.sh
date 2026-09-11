@@ -133,6 +133,30 @@ fixture_toolchain_result="$(cd "$fixture_repo" && "$classifier" --revisions \
 [[ "$fixture_toolchain_result" == 'requires_toolchain_ci=true' ]] \
   || fail "expected toolchain revision range to require CI, got: $fixture_toolchain_result"
 
+fixture_dockerfile_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_docs_head" "$fixture_toolchain_head")"
+[[ "$fixture_dockerfile_publish" == 'publish_mode=full' ]] \
+  || fail "Dockerfile revision range was not full publication: $fixture_dockerfile_publish"
+
+printf 'Dockerfile exclusions\n' > "$fixture_repo/.dockerignore"
+git -C "$fixture_repo" add .dockerignore
+git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add Docker ignore file'
+fixture_dockerignore_head="$(git -C "$fixture_repo" rev-parse HEAD)"
+fixture_dockerignore_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_toolchain_head" "$fixture_dockerignore_head")"
+[[ "$fixture_dockerignore_publish" == 'publish_mode=full' ]] \
+  || fail ".dockerignore revision range was not full publication: $fixture_dockerignore_publish"
+
+mkdir -p "$fixture_repo/scripts"
+printf '#!/usr/bin/env bash\n' > "$fixture_repo/scripts/image-metadata.sh"
+git -C "$fixture_repo" add scripts/image-metadata.sh
+git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add image metadata script'
+fixture_metadata_head="$(git -C "$fixture_repo" rev-parse HEAD)"
+fixture_metadata_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_dockerignore_head" "$fixture_metadata_head")"
+[[ "$fixture_metadata_publish" == 'publish_mode=full' ]] \
+  || fail "image metadata revision range was not full publication: $fixture_metadata_publish"
+
 mkdir -p "$fixture_repo/.github/workflows" "$fixture_repo/scripts" "$fixture_repo/tests"
 for maintenance_path in \
   .github/workflows/flutter-release-watch.yml \
@@ -151,11 +175,11 @@ git -C "$fixture_repo" add .github scripts tests
 git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: merge-6 maintenance changes'
 fixture_maintenance_head="$(git -C "$fixture_repo" rev-parse HEAD)"
 fixture_maintenance_ci="$(cd "$fixture_repo" && "$classifier" --revisions \
-  "$fixture_toolchain_head" "$fixture_maintenance_head")"
+  "$fixture_metadata_head" "$fixture_maintenance_head")"
 [[ "$fixture_maintenance_ci" == 'requires_toolchain_ci=true' ]] \
   || fail "merge-6 maintenance fixture did not require toolchain CI: $fixture_maintenance_ci"
 fixture_maintenance_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
-  "$fixture_toolchain_head" "$fixture_maintenance_head")"
+  "$fixture_metadata_head" "$fixture_maintenance_head")"
 [[ "$fixture_maintenance_publish" == 'publish_mode=none' ]] \
   || fail "merge-6 maintenance fixture did not skip publication: $fixture_maintenance_publish"
 
@@ -374,6 +398,11 @@ assert_contains 'optional Flutter attestation bundle unavailable' "$acquire_sour
 
 publish_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/publish.yml")"
 publication_source="$(sed -n '1,280p' "$publication_classifier")"
+[[ "$(grep -c '^classify_path() {' <<< "$publication_source")" == 1 ]] \
+  || fail 'publication path policy must have one classify_path helper'
+[[ "$(grep -c 'Dockerfile|\.dockerignore|scripts/image-metadata\.sh' \
+  <<< "$publication_source")" == 1 ]] \
+  || fail 'publication artifact input policy must have one path table'
 assert_no_text_match 'awk.*digest:' "$publish_source"
 assert_contains 'docker image inspect' "$publish_source"
 assert_contains '.RepoDigests' "$publish_source"
