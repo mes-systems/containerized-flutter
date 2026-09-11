@@ -16,9 +16,10 @@ of its release metadata matches the pinned entry, and independently hashes the
 already acquired archive. The Dockerfile checks that same digest again before
 extracting the SDK, then verifies the extracted Git revision and Flutter tag.
 
-Flutter also publishes SLSA/in-toto bundles next to its archives. Those bundles
-are retained by acquisition for diagnostics, but their current LUCI/BCID
-signing key is not externally usable through a stable public verification path.
+Flutter also publishes SLSA/in-toto bundles next to its archives. Acquisition
+best-effort downloads those bundles for diagnostics when available, but their
+current LUCI/BCID signing key is not externally usable through a stable public
+verification path.
 For example, the 3.47.3 bundle is SLSA v0.2 from
 `//bcid.corp.google.com/builders/luci`, with no
 usable version-controlled Flutter source URI. Its subject SHA256 is useful for
@@ -89,9 +90,10 @@ scripts/verify-release.sh \
   .artifacts/flutter-sdk.tar.xz
 ```
 
-The attestation file is downloaded alongside the archive but is informational
-only in this release. A changed archive, release-manifest mismatch, revision
-mismatch, or Flutter tag mismatch fails closed.
+The attestation file is an optional diagnostic download in this release. Its
+absence or contents do not affect release acceptance. A changed archive,
+release-manifest mismatch, revision mismatch, or Flutter tag mismatch fails
+closed.
 
 To verify provenance for a published image:
 

@@ -34,19 +34,27 @@ curl \
   --output "$staging_dir/flutter-sdk.tar.xz" \
   "$archive_url"
 
-curl \
+if ! curl \
   --fail \
   --show-error \
   --location \
   --retry 5 \
   --retry-all-errors \
   --output "$staging_dir/flutter-sdk.tar.xz.intoto.jsonl" \
-  "$archive_url.intoto.jsonl"
+  "$archive_url.intoto.jsonl" \
+  || [[ ! -s "$staging_dir/flutter-sdk.tar.xz.intoto.jsonl" ]]; then
+  rm -f -- "$staging_dir/flutter-sdk.tar.xz.intoto.jsonl"
+  printf 'warning: optional Flutter attestation bundle unavailable; continuing without it\n' >&2
+fi
 
 [[ -s "$staging_dir/flutter-sdk.tar.xz" ]] || { printf 'empty Flutter archive\n' >&2; exit 1; }
-[[ -s "$staging_dir/flutter-sdk.tar.xz.intoto.jsonl" ]] \
-  || { printf 'empty Flutter attestation bundle\n' >&2; exit 1; }
 
 mv -f "$staging_dir/flutter-sdk.tar.xz" "$output_dir/flutter-sdk.tar.xz"
-mv -f "$staging_dir/flutter-sdk.tar.xz.intoto.jsonl" "$output_dir/flutter-sdk.tar.xz.intoto.jsonl"
-printf 'acquired %s and informational attestation bundle in %s\n' "$archive_name" "$output_dir"
+if [[ -s "$staging_dir/flutter-sdk.tar.xz.intoto.jsonl" ]]; then
+  mv -f "$staging_dir/flutter-sdk.tar.xz.intoto.jsonl" \
+    "$output_dir/flutter-sdk.tar.xz.intoto.jsonl"
+else
+  rm -f -- "$output_dir/flutter-sdk.tar.xz.intoto.jsonl"
+fi
+printf 'acquired %s in %s (attestation bundle is optional diagnostics)\n' \
+  "$archive_name" "$output_dir"

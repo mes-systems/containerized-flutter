@@ -35,10 +35,21 @@ do
   assert_fails "$ROOT_DIR/scripts/validate-versions.sh" "$test_dir/invalid.json"
 done
 
+from_line="$(awk '$1 == "FROM" { print; count++ } END { if (count != 1) exit 1 }' \
+  "$ROOT_DIR/Dockerfile")" || fail 'Dockerfile must have one FROM line'
+base_fields="$(printf '%s\n' "$from_line" | sed -nE \
+  's/^FROM[[:space:]]+ubuntu:([0-9]+\.[0-9]+)@sha256:([0-9a-fA-F]{64})[[:space:]]*$/\1 \2/p')"
+[[ "$base_fields" =~ ^24\.04[[:space:]][0-9a-fA-F]{64}$ ]] \
+  || fail 'Dockerfile must pin Ubuntu 24.04 by a full SHA256'
+ubuntu_version="${base_fields%% *}"
+ubuntu_digest="${base_fields#* }"
+ubuntu_digest_short="${ubuntu_digest:0:12}"
+
 metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
   c9a6c484230f8b5e408ec57be1ef71dee1e77020 "$ROOT_DIR/Dockerfile")"
-assert_contains "tag=3.47.3-ubuntu24.04-a61567bd3182" "$metadata"
-assert_contains "build_tag=3.47.3-ubuntu24.04-a61567bd3182-gc9a6c484230f" "$metadata"
+assert_contains "tag=3.47.3-ubuntu${ubuntu_version}-${ubuntu_digest_short}" "$metadata"
+assert_contains "build_tag=3.47.3-ubuntu${ubuntu_version}-${ubuntu_digest_short}-gc9a6c484230f" \
+  "$metadata"
 
 printf 'FROM ubuntu:24.04\n' > "$test_dir/Dockerfile"
 assert_fails "$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
@@ -56,9 +67,19 @@ if rg -n -i 'rst[ -]?platform|consumer application|consumer pub' \
   fail 'repository contains a consumer-specific reference'
 fi
 
-assert_contains 'FROM ubuntu:24.04@sha256:a61567bd31828687156d735ea8eb01ba4e37636e225dd6a48ba94136a70d9d61' \
-  "$(sed -n '1,80p' "$ROOT_DIR/Dockerfile")"
+acquire_source="$(sed -n '1,180p' "$ROOT_DIR/scripts/acquire-flutter.sh")"
+if rg -n 'empty Flutter attestation bundle' <<< "$acquire_source"; then
+  fail 'informational attestation download must not be mandatory'
+fi
+assert_contains 'optional Flutter attestation bundle unavailable' "$acquire_source"
+
+publish_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/publish.yml")"
+if rg -n 'awk.*digest:' <<< "$publish_source"; then
+  fail 'publish workflow must not parse docker push output'
+fi
+assert_contains 'docker image inspect' "$publish_source"
+assert_contains '.RepoDigests' "$publish_source"
 assert_contains 'provenance: false' "$(sed -n '1,240p' "$ROOT_DIR/.github/workflows/ci.yml")"
-assert_contains 'push-to-registry: true' "$(sed -n '1,260p' "$ROOT_DIR/.github/workflows/publish.yml")"
+assert_contains 'push-to-registry: true' "$publish_source"
 
 printf 'PASS: script and supply-chain guardrails\n'

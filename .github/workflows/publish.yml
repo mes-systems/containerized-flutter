@@ -127,16 +127,20 @@ jobs:
           BUILD_TAG: ${{ steps.metadata.outputs.build_tag }}
         run: |
           set -euo pipefail
-          canonical_log="$(mktemp)"
-          build_log="$(mktemp)"
-          trap 'rm -f -- "$canonical_log" "$build_log"' EXIT
+          image_digest() {
+            local reference="$1"
+            docker image inspect \
+              --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              "$reference" \
+              | awk -F@ '$2 ~ /^sha256:[0-9a-f]{64}$/ { print $2; exit }'
+          }
 
-          docker push "$IMAGE_NAME:$CANONICAL_TAG" 2>&1 | tee "$canonical_log"
-          digest="$(awk '$1 == "digest:" { print $2; exit }' "$canonical_log")"
+          docker push "$IMAGE_NAME:$CANONICAL_TAG"
+          digest="$(image_digest "$IMAGE_NAME:$CANONICAL_TAG")"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
 
-          docker push "$IMAGE_NAME:$BUILD_TAG" 2>&1 | tee "$build_log"
-          build_digest="$(awk '$1 == "digest:" { print $2; exit }' "$build_log")"
+          docker push "$IMAGE_NAME:$BUILD_TAG"
+          build_digest="$(image_digest "$IMAGE_NAME:$BUILD_TAG")"
           [[ "$build_digest" == "$digest" ]]
 
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
