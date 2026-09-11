@@ -4,6 +4,10 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: ubuntu
+        versions:
+          - "> 24.04"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
