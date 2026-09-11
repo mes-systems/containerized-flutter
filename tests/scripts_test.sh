@@ -175,6 +175,8 @@ assert_fails "$ROOT_DIR/scripts/verify-release.sh" 3.47.3 stable \
   e8113bf45620cbeb8aff64947ee4c93e16adb4cf \
   988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1 \
   "$ROOT_DIR/not-the-official-archive.tar.xz"
+verify_source="$(sed -n '1,180p' "$ROOT_DIR/scripts/verify-release.sh")"
+assert_contains 'dart_sdk_arch == "x64"' "$verify_source"
 assert_fails "$ROOT_DIR/scripts/smoke-test.sh" image 3.47.3
 
 if rg -n -i 'rst[ -]?platform|consumer application|consumer pub' \
@@ -219,16 +221,21 @@ assert_contains 'publish_matrix' "$publish_source"
 assert_contains 'publish_needed' "$publish_source"
 assert_contains 'scripts/publish-matrix.sh' "$publish_source"
 assert_contains 'git show "$base_sha:supported_version.json"' "$publish_source"
+assert_contains 'falling back to full publication' "$publish_source"
 
 watcher_source="$(sed -n '1,320p' "$ROOT_DIR/.github/workflows/flutter-release-watch.yml")"
 assert_contains 'cron: "17 3 * * *"' "$watcher_source"
 assert_contains 'automation/flutter-support-update' "$watcher_source"
 assert_contains 'releases_linux.json' "$watcher_source"
 assert_contains 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' "$watcher_source"
-assert_contains 'FLUTTER_WATCHER_APP_ID' "$watcher_source"
-assert_contains 'FLUTTER_WATCHER_PRIVATE_KEY' "$watcher_source"
+assert_contains 'environment:' "$watcher_source"
+assert_contains 'name: flutter-release-watcher' "$watcher_source"
+assert_contains 'deployment: false' "$watcher_source"
+assert_contains 'app-id: ${{ vars.FLUTTER_WATCHER_APP_ID }}' "$watcher_source"
+assert_contains 'private-key: ${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}' "$watcher_source"
 assert_contains 'security_anomaly' "$watcher_source"
-if rg -n 'peter-evans|create-pull-request|github-actions-create-pr|secrets.PAT|secrets.GH_TOKEN' \
+assert_contains 'Configure it for the `main` branch/ref with no required reviewer' "$(< "$ROOT_DIR/README.md")"
+if rg -n 'secrets\.FLUTTER_WATCHER_APP_ID|peter-evans|create-pull-request|github-actions-create-pr|secrets\.PAT|secrets\.GH_TOKEN' \
   <<< "$watcher_source"; then
   fail 'watcher must use the dedicated GitHub App token, not a PAT or third-party PR action'
 fi

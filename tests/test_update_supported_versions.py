@@ -33,13 +33,24 @@ def load_fixture_from_path(path: Path):
         return json.load(handle)
 
 
-def release(version: str, revision: str, sha256: str) -> dict[str, str]:
+def release(version: str, revision: str, sha256: str, architecture: str = "x64") -> dict[str, str]:
     return {
         "version": version,
         "channel": "stable",
+        "dart_sdk_arch": architecture,
         "hash": revision,
         "archive": f"stable/linux/flutter_linux_{version}-stable.tar.xz",
         "sha256": sha256,
+    }
+
+
+def supported_entry(release_record: dict[str, str]) -> dict[str, str]:
+    return {
+        "version": release_record["version"],
+        "channel": release_record["channel"],
+        "revision": release_record["hash"],
+        "archive": release_record["archive"],
+        "archive_sha256": release_record["sha256"],
     }
 
 
@@ -142,6 +153,40 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         self.assertEqual([entry["version"] for entry in summary["changes"]["new_minors"]], ["2.1.0"])
         self.assertEqual(summary["changes"]["retired"], [])
 
+    def test_unused_capacity_does_not_backfill_historical_minor(self):
+        manifest = load_fixture("supported_version.json")
+        new_minor = release(
+            "2.1.0",
+            "8888888888888888888888888888888888888888",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        )
+        manifest["supported_versions"] = manifest["supported_versions"][1:] + [
+            supported_entry(new_minor)
+        ]
+        releases = load_fixture("releases_linux.json")
+        releases["releases"].extend(
+            [
+                new_minor,
+                release(
+                    "1.3.0",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                ),
+            ]
+        )
+        case_dir = self.make_case(releases)
+        (case_dir / "supported_version.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected_versions = [entry["version"] for entry in manifest["supported_versions"]]
+        self.assertEqual(self.versions(case_dir), expected_versions)
+        self.assertNotIn("1.3.0", self.versions(case_dir))
+        self.assertEqual(summary["changes"]["new_minors"], [])
+        self.assertEqual(summary["changes"]["retired"], [])
+
     def test_fifth_minor_retires_oldest_using_policy(self):
         releases = load_fixture("releases_linux.json")
         releases["releases"].extend(
@@ -198,6 +243,54 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         self.assertEqual(before["supported_version.json"], (case_dir / "supported_version.json").read_bytes())
         self.assertEqual(before["README.md"], (case_dir / "README.md").read_bytes())
 
+    def test_same_version_x64_and_arm64_is_not_a_duplicate(self):
+        releases = load_fixture("releases_linux.json")
+        releases["releases"].append(
+            release(
+                "1.2.3",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "arm64",
+            )
+        )
+        case_dir = self.make_case(releases)
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(summary["status"], "unchanged")
+        self.assertEqual(self.versions(case_dir), ["1.2.3", "1.4.2", "2.0.1"])
+
+    def test_arm64_only_unrelated_release_is_ignored(self):
+        releases = load_fixture("releases_linux.json")
+        releases["releases"].append(
+            release(
+                "3.0.0",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "arm64",
+            )
+        )
+        case_dir = self.make_case(releases)
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(summary["update_needed"])
+        self.assertEqual(self.versions(case_dir), ["1.2.3", "1.4.2", "2.0.1"])
+
+    def test_newer_arm64_patch_does_not_replace_x64_patch(self):
+        releases = load_fixture("releases_linux.json")
+        releases["releases"].append(
+            release(
+                "1.2.4",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "arm64",
+            )
+        )
+        case_dir = self.make_case(releases)
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(summary["update_needed"])
+        self.assertEqual(self.versions(case_dir), ["1.2.3", "1.4.2", "2.0.1"])
+
     def test_trusted_metadata_mutations_are_anomalies(self):
         cases = {
             "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -230,6 +323,23 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(summary["anomalies"][0]["kind"], "supported_release_disappeared")
         self.assertEqual(summary["anomalies"][0]["old"]["version"], "1.2.3")
+
+    def test_supported_x64_disappearance_is_anomaly_even_if_arm64_remains(self):
+        releases = load_fixture("releases_linux.json")
+        releases["releases"] = [item for item in releases["releases"] if item.get("version") != "1.2.3"]
+        releases["releases"].append(
+            release(
+                "1.2.3",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "arm64",
+            )
+        )
+        case_dir = self.make_case(releases)
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(summary["status"], "security_anomaly")
+        self.assertEqual(summary["anomalies"][0]["kind"], "supported_release_disappeared")
 
     def test_readme_table_exactly_follows_generated_manifest(self):
         releases = load_fixture("releases_linux.json")

@@ -100,8 +100,15 @@ jobs:
                 if git show "$base_sha:supported_version.json" > "$old_manifest" \
                   && jq -e 'type == "object" and (.supported_versions | type == "array")' \
                     "$old_manifest" >/dev/null; then
-                  publish_matrix="$(scripts/publish-matrix.sh "$old_manifest" supported_version.json)"
-                  if [[ "$(jq -er '.include | length' <<< "$publish_matrix")" -gt 0 ]]; then
+                  if candidate_publish_matrix="$(scripts/publish-matrix.sh "$old_manifest" supported_version.json)" \
+                    && jq -e '.include | type == "array"' <<< "$candidate_publish_matrix" >/dev/null; then
+                    publish_matrix="$candidate_publish_matrix"
+                    if [[ "$(jq -er '.include | length' <<< "$publish_matrix")" -gt 0 ]]; then
+                      publish_needed=true
+                    fi
+                  else
+                    printf 'could not safely compare manifests; falling back to full publication\n' >&2
+                    publish_matrix="$matrix"
                     publish_needed=true
                   fi
                 else

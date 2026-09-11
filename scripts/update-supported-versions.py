@@ -59,6 +59,7 @@ def raw_release_metadata(release: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": release.get("version"),
         "channel": release.get("channel"),
+        "dart_sdk_arch": release.get("dart_sdk_arch"),
         "revision": release.get("hash"),
         "archive": release.get("archive"),
         "archive_sha256": release.get("sha256"),
@@ -128,7 +129,11 @@ def validate_supported_manifest(manifest: Any, path: Path) -> tuple[dict[str, An
 
 
 def valid_release(release: Any, policy_channel: str) -> dict[str, Any] | None:
-    if not isinstance(release, dict) or release.get("channel") != policy_channel:
+    if (
+        not isinstance(release, dict)
+        or release.get("channel") != policy_channel
+        or release.get("dart_sdk_arch") != "x64"
+    ):
         return None
     version = release.get("version")
     if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
@@ -183,7 +188,11 @@ def collect_releases(
 
     raw_by_version: dict[str, list[dict[str, Any]]] = {}
     for release in release_manifest["releases"]:
-        if not isinstance(release, dict) or release.get("channel") != policy_channel:
+        if (
+            not isinstance(release, dict)
+            or release.get("channel") != policy_channel
+            or release.get("dart_sdk_arch") != "x64"
+        ):
             continue
         version = release.get("version")
         if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
@@ -282,7 +291,9 @@ def find_trust_anomalies(
     return sorted(anomalies, key=lambda item: (version_key(item["version"]), item["kind"]))
 
 
-def select_supported(candidates: dict[str, dict[str, Any]], minor_lines: int) -> list[dict[str, Any]]:
+def select_supported(
+    candidates: dict[str, dict[str, Any]], current_entries: list[dict[str, Any]], minor_lines: int
+) -> list[dict[str, Any]]:
     latest_by_minor: dict[tuple[int, int], dict[str, Any]] = {}
     for candidate in candidates.values():
         parsed_version = version_key(candidate["version"])
@@ -290,7 +301,13 @@ def select_supported(candidates: dict[str, dict[str, Any]], minor_lines: int) ->
         current = latest_by_minor.get(minor)
         if current is None or parsed_version > version_key(current["version"]):
             latest_by_minor[minor] = candidate
-    selected_minors = sorted(latest_by_minor)[-minor_lines:]
+    current_minors = {version_key(entry["version"])[:2] for entry in current_entries}
+    newest_current_minor = max(current_minors)
+    selected_minors = sorted(
+        minor
+        for minor in latest_by_minor
+        if minor in current_minors or minor > newest_current_minor
+    )[-minor_lines:]
     return [latest_by_minor[minor] for minor in selected_minors]
 
 
@@ -526,7 +543,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
         summary = build_anomaly_summary(policy, anomalies)
         return summary, render_summary_markdown(summary)
 
-    new_entries = select_supported(candidates, minor_lines)
+    new_entries = select_supported(candidates, old_entries, minor_lines)
     proposed_manifest = {
         "schema": manifest["schema"],
         "support_policy": policy,

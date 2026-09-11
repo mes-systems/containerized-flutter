@@ -13,7 +13,7 @@ the Flutter version, stable channel, official archive path, Git revision, and
 archive SHA256.
 
 scripts/verify-release.sh downloads the official
-releases_linux.json, requires exactly one matching release, checks that all
+releases_linux.json, requires exactly one matching stable Linux x64 release, checks that all
 of its release metadata matches the pinned entry, and independently hashes the
 already acquired archive. The Dockerfile checks that same digest again before
 extracting the SDK, then verifies the extracted Git revision and Flutter tag.
@@ -37,12 +37,13 @@ exact OCI digest.
 ## Supported releases
 
 Containerized Flutter actively maintains the latest patch release of up to four
-recent stable Flutter minor release lines. The policy is encoded in
+active stable Flutter minor release lines. The policy is encoded in
 `supported_version.json` as `minor_lines: 4` and
 `selection: latest_patch_per_minor`.
 
 A new patch release for an existing minor line replaces its current entry. A
-new stable minor line adds its newest release; once four lines are supported,
+new stable minor line newer than the active window adds its newest release;
+historical lines never backfill unused capacity. Once four lines are supported,
 the oldest line is retired. Superseded or retired releases are removed from
 the active support manifest and are no longer rebuilt when the base image or
 packaging changes. Previously published image tags and OCI digests remain
@@ -159,6 +160,22 @@ manifest and README updates in one pull request. Acceptance remains
 maintainer-reviewed through that PR; the watcher never silently changes the
 trust-root metadata for an already supported exact release. The same
 release-manifest and local archive checks run in CI and before publication.
+
+## Watcher setup
+
+The watcher requires a repository Environment named `flutter-release-watcher`.
+Configure it for the `main` branch/ref with no required reviewer; the workflow
+sets `deployment: false` because it is not a deployment workflow. Add only:
+
+- Environment variable: `FLUTTER_WATCHER_APP_ID`
+- Environment secret: `FLUTTER_WATCHER_PRIVATE_KEY`
+
+Install the dedicated least-privilege GitHub App with Metadata read, Contents
+read/write, Pull requests read/write, and Issues read/write permissions. Do not
+use repository-level equivalents or a PAT. The watcher discovers releases,
+resets its stable automation branch from current `main`, and proposes a PR; it
+does not modify `main` or merge automatically. Ordinary PR CI remains the
+acceptance gate.
 
 Dependabot checks the pinned Ubuntu 24.04 Docker digest weekly. When Ubuntu
 changes, its short digest changes the public image tags, while previous tags

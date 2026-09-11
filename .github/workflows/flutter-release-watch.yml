@@ -21,6 +21,9 @@ env:
 jobs:
   watch:
     runs-on: ubuntu-24.04
+    environment:
+      name: flutter-release-watcher
+      deployment: false
     steps:
       - name: Check out current main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -53,7 +56,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.FLUTTER_WATCHER_APP_ID }}
+          app-id: ${{ vars.FLUTTER_WATCHER_APP_ID }}
           private-key: ${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: containerized-flutter
