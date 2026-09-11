@@ -243,6 +243,95 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         self.assertEqual(before["supported_version.json"], (case_dir / "supported_version.json").read_bytes())
         self.assertEqual(before["README.md"], (case_dir / "README.md").read_bytes())
 
+    def test_historical_duplicate_outside_support_window_is_ignored(self):
+        releases = load_fixture("releases_linux.json")
+        releases["releases"].extend(
+            [
+                release(
+                    "1.1.9",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+                release(
+                    "1.1.9",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                ),
+            ]
+        )
+        case_dir = self.make_case(releases)
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(summary["status"], "unchanged")
+        self.assertFalse(summary["anomalies"])
+
+    def test_duplicate_newest_patch_candidate_in_active_minor_is_anomaly(self):
+        releases = load_fixture("releases_linux.json")
+        releases["releases"].extend(
+            [
+                release(
+                    "1.2.4",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+                release(
+                    "1.2.4",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                ),
+            ]
+        )
+        case_dir = self.make_case(releases)
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(summary["anomalies"][0]["kind"], "duplicate_upstream_release")
+        self.assertEqual(summary["anomalies"][0]["version"], "1.2.4")
+        self.assertIsNone(summary["anomalies"][0]["old"])
+
+    def test_duplicate_candidate_in_newer_eligible_minor_is_anomaly(self):
+        releases = load_fixture("releases_linux.json")
+        releases["releases"].extend(
+            [
+                release(
+                    "2.1.0",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+                release(
+                    "2.1.0",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                ),
+            ]
+        )
+        case_dir = self.make_case(releases)
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(summary["anomalies"][0]["kind"], "duplicate_upstream_release")
+        self.assertEqual(summary["anomalies"][0]["version"], "2.1.0")
+
+    def test_duplicate_old_non_selected_patch_inside_active_minor_is_ignored(self):
+        releases = load_fixture("releases_linux.json")
+        releases["releases"].extend(
+            [
+                release(
+                    "1.2.2",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+                release(
+                    "1.2.2",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                ),
+            ]
+        )
+        case_dir = self.make_case(releases)
+        result, summary, _ = self.run_updater(case_dir, "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(summary["status"], "unchanged")
+        self.assertFalse(summary["anomalies"])
+
     def test_same_version_x64_and_arm64_is_not_a_duplicate(self):
         releases = load_fixture("releases_linux.json")
         releases["releases"].append(

@@ -182,7 +182,7 @@ def anomaly(
 
 def collect_releases(
     release_manifest: Any, policy_channel: str
-) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     if not isinstance(release_manifest, dict) or not isinstance(release_manifest.get("releases"), list):
         raise UpdateError("release manifest must be an object with a releases array")
 
@@ -199,48 +199,49 @@ def collect_releases(
             continue
         raw_by_version.setdefault(version, []).append(release)
 
-    anomalies: list[dict[str, Any]] = []
     candidates: dict[str, dict[str, Any]] = {}
     for version in sorted(raw_by_version, key=version_key):
         releases = raw_by_version[version]
-        upstream_metadata = sorted(
-            (raw_release_metadata(release) for release in releases),
-            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
-        )
-        if len(releases) > 1:
-            anomalies.append(
-                anomaly(
-                    "duplicate_upstream_release",
-                    version,
-                    None,
-                    upstream_metadata,
-                    f"official manifest contains {len(releases)} stable entries for {version}",
-                )
-            )
-            continue
-        candidate = valid_release(releases[0], policy_channel)
-        if candidate is not None:
-            candidates[version] = candidate
+        valid_candidates = [
+            candidate
+            for release in releases
+            if (candidate := valid_release(release, policy_channel)) is not None
+        ]
+        if valid_candidates:
+            candidates[version] = sorted(
+                valid_candidates,
+                key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+            )[0]
 
-    return candidates, raw_by_version, anomalies
+    return candidates, raw_by_version
 
 
 def find_trust_anomalies(
     current_entries: list[dict[str, Any]],
     candidates: dict[str, dict[str, Any]],
     raw_by_version: dict[str, list[dict[str, Any]]],
-    existing_anomalies: list[dict[str, Any]],
+    minor_lines: int,
 ) -> list[dict[str, Any]]:
     current_by_version = {entry["version"]: entry for entry in current_entries}
-    anomalies = [
-        {
-            **item,
-            "old": current_by_version.get(item["version"]),
-        }
-        if item["kind"] == "duplicate_upstream_release"
-        else item
-        for item in existing_anomalies
-    ]
+    selected_versions = {entry["version"] for entry in select_supported(candidates, current_entries, minor_lines)}
+    relevant_versions = set(current_by_version) | selected_versions
+    anomalies: list[dict[str, Any]] = []
+    for version in sorted(relevant_versions, key=version_key):
+        releases = raw_by_version.get(version, [])
+        if len(releases) > 1:
+            upstream_metadata = sorted(
+                (raw_release_metadata(release) for release in releases),
+                key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+            )
+            anomalies.append(
+                anomaly(
+                    "duplicate_upstream_release",
+                    version,
+                    current_by_version.get(version),
+                    upstream_metadata,
+                    f"official manifest contains {len(releases)} stable entries for {version}",
+                )
+            )
     for current in current_entries:
         version = current["version"]
         releases = raw_by_version.get(version, [])
@@ -537,8 +538,8 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
     manifest = load_json(manifest_path, "supported version manifest")
     policy, old_entries, minor_lines = validate_supported_manifest(manifest, manifest_path)
     release_manifest = load_json(releases_path, "release manifest")
-    candidates, raw_by_version, initial_anomalies = collect_releases(release_manifest, policy["channel"])
-    anomalies = find_trust_anomalies(old_entries, candidates, raw_by_version, initial_anomalies)
+    candidates, raw_by_version = collect_releases(release_manifest, policy["channel"])
+    anomalies = find_trust_anomalies(old_entries, candidates, raw_by_version, minor_lines)
     if anomalies:
         summary = build_anomaly_summary(policy, anomalies)
         return summary, render_summary_markdown(summary)

@@ -46,6 +46,7 @@ assert_fails() {
 manifest="$ROOT_DIR/supported_version.json"
 validator="$ROOT_DIR/scripts/validate-supported-versions.sh"
 classifier="$ROOT_DIR/scripts/classify-changes.sh"
+publication_classifier="$ROOT_DIR/scripts/classify-publication.sh"
 publish_matrix_script="$ROOT_DIR/scripts/publish-matrix.sh"
 
 command -v grep >/dev/null 2>&1 || fail 'required command not found: grep'
@@ -62,6 +63,15 @@ assert_classification() {
     || fail "expected requires_toolchain_ci=$expected, got: $actual"
 }
 
+assert_publication_mode() {
+  local expected="$1"
+  shift
+  local actual
+  actual="$("$publication_classifier" --paths "$@")"
+  [[ "$actual" == "publish_mode=$expected" ]] \
+    || fail "expected publish_mode=$expected, got: $actual"
+}
+
 assert_classification false README.md
 assert_classification false README.md SECURITY.md
 assert_classification false docs/maintenance.md
@@ -72,6 +82,28 @@ assert_classification true README.md tests/smoke_app/test/smoke_test.dart
 assert_classification true some-new-future-file
 assert_classification true
 assert_classification true --revisions not-a-base not-a-head
+
+assert_publication_mode none README.md
+assert_publication_mode none .github/workflows/flutter-release-watch.yml
+assert_publication_mode none .github/workflows/publish.yml
+assert_publication_mode none .github/workflows/ci.yml
+assert_publication_mode none scripts/update-supported-versions.py
+assert_publication_mode none scripts/verify-release.sh
+assert_publication_mode none scripts/acquire-flutter.sh
+assert_publication_mode none scripts/smoke-test.sh
+assert_publication_mode none scripts/classify-changes.sh
+assert_publication_mode none tests/test_update_supported_versions.py
+assert_publication_mode none LICENSE SECURITY.md .github/dependabot.yml docs/maintenance.md
+assert_publication_mode selective supported_version.json
+assert_publication_mode selective supported_version.json README.md \
+  .github/workflows/flutter-release-watch.yml
+assert_publication_mode full Dockerfile
+assert_publication_mode full .dockerignore
+assert_publication_mode full scripts/image-metadata.sh
+assert_publication_mode full Dockerfile supported_version.json
+[[ "$("$publication_classifier" --workflow-dispatch)" == 'publish_mode=full' ]] \
+  || fail 'workflow_dispatch classification was not full'
+assert_fails "$publication_classifier" --revisions not-a-base not-a-head
 
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "$test_dir"' EXIT
@@ -101,7 +133,161 @@ fixture_toolchain_result="$(cd "$fixture_repo" && "$classifier" --revisions \
 [[ "$fixture_toolchain_result" == 'requires_toolchain_ci=true' ]] \
   || fail "expected toolchain revision range to require CI, got: $fixture_toolchain_result"
 
+fixture_dockerfile_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_docs_head" "$fixture_toolchain_head")"
+[[ "$fixture_dockerfile_publish" == 'publish_mode=full' ]] \
+  || fail "Dockerfile revision range was not full publication: $fixture_dockerfile_publish"
+
+printf 'Dockerfile exclusions\n' > "$fixture_repo/.dockerignore"
+git -C "$fixture_repo" add .dockerignore
+git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add Docker ignore file'
+fixture_dockerignore_head="$(git -C "$fixture_repo" rev-parse HEAD)"
+fixture_dockerignore_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_toolchain_head" "$fixture_dockerignore_head")"
+[[ "$fixture_dockerignore_publish" == 'publish_mode=full' ]] \
+  || fail ".dockerignore revision range was not full publication: $fixture_dockerignore_publish"
+
+mkdir -p "$fixture_repo/scripts"
+printf '#!/usr/bin/env bash\n' > "$fixture_repo/scripts/image-metadata.sh"
+git -C "$fixture_repo" add scripts/image-metadata.sh
+git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add image metadata script'
+fixture_metadata_head="$(git -C "$fixture_repo" rev-parse HEAD)"
+fixture_metadata_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_dockerignore_head" "$fixture_metadata_head")"
+[[ "$fixture_metadata_publish" == 'publish_mode=full' ]] \
+  || fail "image metadata revision range was not full publication: $fixture_metadata_publish"
+
+mkdir -p "$fixture_repo/.github/workflows" "$fixture_repo/scripts" "$fixture_repo/tests"
+for maintenance_path in \
+  .github/workflows/flutter-release-watch.yml \
+  .github/workflows/publish.yml \
+  .github/workflows/ci.yml \
+  scripts/update-supported-versions.py \
+  scripts/verify-release.sh \
+  scripts/acquire-flutter.sh \
+  scripts/smoke-test.sh \
+  scripts/classify-changes.sh \
+  tests/test_update_supported_versions.py
+do
+  printf 'maintenance\n' > "$fixture_repo/$maintenance_path"
+done
+git -C "$fixture_repo" add .github scripts tests
+git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: merge-6 maintenance changes'
+fixture_maintenance_head="$(git -C "$fixture_repo" rev-parse HEAD)"
+fixture_maintenance_ci="$(cd "$fixture_repo" && "$classifier" --revisions \
+  "$fixture_metadata_head" "$fixture_maintenance_head")"
+[[ "$fixture_maintenance_ci" == 'requires_toolchain_ci=true' ]] \
+  || fail "merge-6 maintenance fixture did not require toolchain CI: $fixture_maintenance_ci"
+fixture_maintenance_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_metadata_head" "$fixture_maintenance_head")"
+[[ "$fixture_maintenance_publish" == 'publish_mode=none' ]] \
+  || fail "merge-6 maintenance fixture did not skip publication: $fixture_maintenance_publish"
+
 publish_base="$ROOT_DIR/tests/fixtures/supported_version.json"
+
+dispatch_plan="$("$publication_classifier" --workflow-dispatch "$publish_base")"
+assert_contains 'publish_mode=full' "$dispatch_plan"
+assert_contains 'publish_needed=true' "$dispatch_plan"
+dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_plan")"
+[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 3 ]] \
+  || fail 'workflow_dispatch did not plan every supported release'
+
+publication_repo="$test_dir/publication-repo"
+git init -q "$publication_repo"
+git -C "$publication_repo" config user.name publication-test
+git -C "$publication_repo" config user.email publication-test@example.invalid
+cp "$publish_base" "$publication_repo/supported_version.json"
+printf 'README\n' > "$publication_repo/README.md"
+git -C "$publication_repo" add supported_version.json README.md
+git -C "$publication_repo" -c commit.gpgsign=false commit -qm 'fixture: initial publication manifest'
+publication_base="$(git -C "$publication_repo" rev-parse HEAD)"
+jq '
+  .supported_versions[0] = (.supported_versions[0]
+    | .version = "1.2.4"
+    | .revision = "7777777777777777777777777777777777777777"
+    | .archive = "stable/linux/flutter_linux_1.2.4-stable.tar.xz"
+    | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
+' "$publication_repo/supported_version.json" > "$test_dir/publication-manifest.json"
+mv "$test_dir/publication-manifest.json" "$publication_repo/supported_version.json"
+git -C "$publication_repo" add supported_version.json
+git -C "$publication_repo" -c commit.gpgsign=false commit -qm 'fixture: update publication manifest'
+publication_head="$(git -C "$publication_repo" rev-parse HEAD)"
+selective_plan="$(cd "$publication_repo" && "$publication_classifier" --revisions \
+  "$publication_base" "$publication_head" supported_version.json)"
+assert_contains 'publish_mode=selective' "$selective_plan"
+assert_contains 'publish_needed=true' "$selective_plan"
+selective_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$selective_plan")"
+[[ "$(jq -er '.include | length' <<< "$selective_matrix")" == 1 ]] \
+  || fail 'selective planner did not contain one patch replacement'
+[[ "$(jq -er '.include[0].version' <<< "$selective_matrix")" == '1.2.4' ]] \
+  || fail 'selective planner omitted the replacement patch'
+
+jq '.supported_versions = .supported_versions[1:]' "$publication_repo/supported_version.json" \
+  > "$test_dir/retirement-manifest.json"
+mv "$test_dir/retirement-manifest.json" "$publication_repo/supported_version.json"
+git -C "$publication_repo" add supported_version.json
+git -C "$publication_repo" -c commit.gpgsign=false commit -qm 'fixture: retire publication release'
+retirement_head="$(git -C "$publication_repo" rev-parse HEAD)"
+retirement_plan="$(cd "$publication_repo" && "$publication_classifier" --revisions \
+  "$publication_head" "$retirement_head" supported_version.json)"
+assert_contains 'publish_mode=selective' "$retirement_plan"
+assert_contains 'publish_needed=false' "$retirement_plan"
+retirement_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$retirement_plan")"
+[[ "$(jq -er '.include | length' <<< "$retirement_matrix")" == 0 ]] \
+  || fail 'retirement-only planner attempted publication'
+
+jq '.supported_versions += [{
+  "version": "2.1.0",
+  "channel": "stable",
+  "revision": "8888888888888888888888888888888888888888",
+  "archive": "stable/linux/flutter_linux_2.1.0-stable.tar.xz",
+  "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+}]' "$publication_repo/supported_version.json" > "$test_dir/new-minor-manifest.json"
+mv "$test_dir/new-minor-manifest.json" "$publication_repo/supported_version.json"
+git -C "$publication_repo" add supported_version.json
+git -C "$publication_repo" -c commit.gpgsign=false commit -qm 'fixture: add publication minor'
+new_minor_head="$(git -C "$publication_repo" rev-parse HEAD)"
+new_minor_plan="$(cd "$publication_repo" && "$publication_classifier" --revisions \
+  "$retirement_head" "$new_minor_head" supported_version.json)"
+assert_contains 'publish_mode=selective' "$new_minor_plan"
+assert_contains 'publish_needed=true' "$new_minor_plan"
+new_minor_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$new_minor_plan")"
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 1 ]] \
+  || fail 'new-minor planner did not contain one release'
+[[ "$(jq -er '.include[0].version' <<< "$new_minor_matrix")" == '2.1.0' ]] \
+  || fail 'new-minor planner omitted the new release'
+
+printf 'README update\n' >> "$publication_repo/README.md"
+git -C "$publication_repo" add README.md
+git -C "$publication_repo" -c commit.gpgsign=false commit -qm 'fixture: documentation-only change'
+readme_head="$(git -C "$publication_repo" rev-parse HEAD)"
+readme_plan="$(cd "$publication_repo" && "$publication_classifier" --revisions \
+  "$new_minor_head" "$readme_head" supported_version.json)"
+assert_contains 'publish_mode=none' "$readme_plan"
+assert_contains 'publish_needed=false' "$readme_plan"
+readme_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$readme_plan")"
+[[ "$(jq -er '.include | length' <<< "$readme_matrix")" == 0 ]] \
+  || fail 'README-only planner attempted publication'
+
+broken_repo="$test_dir/broken-publication-repo"
+git init -q "$broken_repo"
+git -C "$broken_repo" config user.name broken-publication-test
+git -C "$broken_repo" config user.email broken-publication-test@example.invalid
+printf '{}\n' > "$broken_repo/supported_version.json"
+git -C "$broken_repo" add supported_version.json
+git -C "$broken_repo" -c commit.gpgsign=false commit -qm 'fixture: broken old manifest'
+broken_base="$(git -C "$broken_repo" rev-parse HEAD)"
+cp "$publish_base" "$broken_repo/supported_version.json"
+git -C "$broken_repo" add supported_version.json
+git -C "$broken_repo" -c commit.gpgsign=false commit -qm 'fixture: valid current manifest'
+broken_head="$(git -C "$broken_repo" rev-parse HEAD)"
+broken_plan_output="$test_dir/broken-publication-plan.out"
+if (cd "$broken_repo" && "$publication_classifier" --revisions \
+  "$broken_base" "$broken_head" supported_version.json) > "$broken_plan_output" 2>&1; then
+  fail 'publication planner accepted a broken previous manifest'
+fi
+assert_no_text_match 'publish_mode=full' "$(< "$broken_plan_output")"
+
 jq '
   .supported_versions[0] = (.supported_versions[0]
     | .version = "1.2.4"
@@ -211,6 +397,12 @@ assert_no_text_match 'empty Flutter attestation bundle' "$acquire_source"
 assert_contains 'optional Flutter attestation bundle unavailable' "$acquire_source"
 
 publish_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/publish.yml")"
+publication_source="$(sed -n '1,280p' "$publication_classifier")"
+[[ "$(grep -c '^classify_path() {' <<< "$publication_source")" == 1 ]] \
+  || fail 'publication path policy must have one classify_path helper'
+[[ "$(grep -c 'Dockerfile|\.dockerignore|scripts/image-metadata\.sh' \
+  <<< "$publication_source")" == 1 ]] \
+  || fail 'publication artifact input policy must have one path table'
 assert_no_text_match 'awk.*digest:' "$publish_source"
 assert_contains 'docker image inspect' "$publish_source"
 assert_contains '.RepoDigests' "$publish_source"
@@ -227,15 +419,19 @@ assert_contains 'if: always()' "$ci_source"
 assert_no_text_match 'ref:.*pull_request\.head\.sha' "$ci_source"
 assert_no_text_match 'paths-ignore:' "$ci_source"
 
-assert_contains 'scripts/classify-changes.sh --revisions' "$publish_source"
+assert_contains 'scripts/classify-publication.sh' "$publish_source"
 assert_contains '.before' "$publish_source"
 assert_contains '.after' "$publish_source"
 assert_contains 'GITHUB_EVENT_NAME' "$publish_source"
+assert_contains 'publish_mode' "$publish_source"
 assert_contains 'publish_matrix' "$publish_source"
 assert_contains 'publish_needed' "$publish_source"
-assert_contains 'scripts/publish-matrix.sh' "$publish_source"
-assert_contains 'git show "$base_sha:supported_version.json"' "$publish_source"
-assert_contains 'falling back to full publication' "$publish_source"
+assert_no_text_match 'requires_toolchain_ci' "$publish_source"
+assert_no_text_match 'falling back to full publication' "$publish_source"
+assert_contains 'publish-matrix.sh' "$publication_source"
+assert_contains 'validate-supported-versions.sh' "$publication_source"
+assert_contains 'could not read previous supported version manifest' "$publication_source"
+assert_no_text_match 'falling back to full publication' "$publication_source"
 
 watcher_source="$(sed -n '1,320p' "$ROOT_DIR/.github/workflows/flutter-release-watch.yml")"
 assert_contains 'cron: "17 3 * * *"' "$watcher_source"
