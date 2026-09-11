@@ -178,3 +178,30 @@ jobs:
           push-to-registry: true
           create-storage-record: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove tested image
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          images=(
+            "${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.tag }}"
+            "${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.build_tag }}"
+          )
+          cleanup_failed=0
+          for image in "${images[@]}"; do
+            if docker image inspect "$image" >/dev/null 2>&1; then
+              if ! docker image rm -f "$image"; then
+                cleanup_failed=1
+              fi
+            fi
+          done
+          for image in "${images[@]}"; do
+            if docker image inspect "$image" >/dev/null 2>&1; then
+              printf 'test image leaked after cleanup: %s\n' "$image" >&2
+              cleanup_failed=1
+            fi
+          done
+          if (( cleanup_failed != 0 )); then
+            exit 1
+          fi

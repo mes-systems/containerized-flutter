@@ -119,6 +119,20 @@ jobs:
             "${{ matrix.version }}" \
             "${{ matrix.revision }}"
 
+      - name: Remove tested image
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }}"
+          if docker image inspect "$image" >/dev/null 2>&1; then
+            docker image rm -f "$image"
+          fi
+          if docker image inspect "$image" >/dev/null 2>&1; then
+            printf 'test image leaked after cleanup: %s\n' "$image" >&2
+            exit 1
+          fi
+
   ci-gate:
     name: CI gate
     if: always()
