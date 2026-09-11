@@ -30,8 +30,8 @@ while IFS= read -r line; do
   instruction_upper="$(printf '%s' "$instruction" | tr '[:lower:]' '[:upper:]')"
   case "$instruction_upper" in
     FROM)
-      ((from_count += 1))
-      ((stage += 1))
+      from_count=$((from_count + 1))
+      stage=$((stage + 1))
       final_stage="$stage"
       read -r -a from_args <<< "$rest"
       for ((i = 0; i + 1 < ${#from_args[@]}; i++)); do
