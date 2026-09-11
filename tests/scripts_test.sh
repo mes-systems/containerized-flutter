@@ -23,8 +23,10 @@ assert_fails() {
 manifest="$ROOT_DIR/supported_version.json"
 validator="$ROOT_DIR/scripts/validate-supported-versions.sh"
 classifier="$ROOT_DIR/scripts/classify-changes.sh"
+publish_matrix_script="$ROOT_DIR/scripts/publish-matrix.sh"
 
 "$validator" "$manifest"
+python3 "$ROOT_DIR/tests/test_update_supported_versions.py"
 
 assert_classification() {
   local expected="$1"
@@ -73,6 +75,39 @@ fixture_toolchain_result="$(cd "$fixture_repo" && "$classifier" --revisions \
   "$fixture_base" "$fixture_toolchain_head")"
 [[ "$fixture_toolchain_result" == 'requires_toolchain_ci=true' ]] \
   || fail "expected toolchain revision range to require CI, got: $fixture_toolchain_result"
+
+publish_base="$ROOT_DIR/tests/fixtures/supported_version.json"
+jq '
+  .supported_versions[0] = (.supported_versions[0]
+    | .version = "1.2.4"
+    | .revision = "7777777777777777777777777777777777777777"
+    | .archive = "stable/linux/flutter_linux_1.2.4-stable.tar.xz"
+    | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
+' "$publish_base" > "$test_dir/publish-patch.json"
+patch_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-patch.json")"
+[[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 1 ]] \
+  || fail 'publish matrix did not contain one patch replacement'
+[[ "$(jq -er '.include[0].version' <<< "$patch_matrix")" == '1.2.4' ]] \
+  || fail 'publish matrix omitted the replacement patch'
+
+jq '.supported_versions += [{
+  "version": "2.1.0",
+  "channel": "stable",
+  "revision": "8888888888888888888888888888888888888888",
+  "archive": "stable/linux/flutter_linux_2.1.0-stable.tar.xz",
+  "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+}]' "$publish_base" > "$test_dir/publish-new-minor.json"
+new_minor_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-new-minor.json")"
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 1 ]] \
+  || fail 'publish matrix did not contain one new minor'
+[[ "$(jq -er '.include[0].version' <<< "$new_minor_matrix")" == '2.1.0' ]] \
+  || fail 'publish matrix omitted the new minor'
+
+jq '.supported_versions = .supported_versions[1:]' "$publish_base" > "$test_dir/publish-retire-only.json"
+retire_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-retire-only.json")"
+[[ "$(jq -er '.include | length' <<< "$retire_matrix")" == 0 ]] \
+  || fail 'publish matrix attempted to publish a retired-only change'
+assert_fails "$publish_matrix_script" "$test_dir/missing.json" "$publish_base"
 
 for filter in \
   '.schema = 2' \
@@ -179,6 +214,23 @@ fi
 assert_contains 'scripts/classify-changes.sh --revisions' "$publish_source"
 assert_contains '.before' "$publish_source"
 assert_contains '.after' "$publish_source"
-assert_contains 'github.event_name == '\''workflow_dispatch'\''' "$publish_source"
+assert_contains 'GITHUB_EVENT_NAME' "$publish_source"
+assert_contains 'publish_matrix' "$publish_source"
+assert_contains 'publish_needed' "$publish_source"
+assert_contains 'scripts/publish-matrix.sh' "$publish_source"
+assert_contains 'git show "$base_sha:supported_version.json"' "$publish_source"
+
+watcher_source="$(sed -n '1,320p' "$ROOT_DIR/.github/workflows/flutter-release-watch.yml")"
+assert_contains 'cron: "17 3 * * *"' "$watcher_source"
+assert_contains 'automation/flutter-support-update' "$watcher_source"
+assert_contains 'releases_linux.json' "$watcher_source"
+assert_contains 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' "$watcher_source"
+assert_contains 'FLUTTER_WATCHER_APP_ID' "$watcher_source"
+assert_contains 'FLUTTER_WATCHER_PRIVATE_KEY' "$watcher_source"
+assert_contains 'security_anomaly' "$watcher_source"
+if rg -n 'peter-evans|create-pull-request|github-actions-create-pr|secrets.PAT|secrets.GH_TOKEN' \
+  <<< "$watcher_source"; then
+  fail 'watcher must use the dedicated GitHub App token, not a PAT or third-party PR action'
+fi
 
 printf 'PASS: script and supply-chain guardrails\n'

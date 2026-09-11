@@ -19,6 +19,8 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      publish_matrix: ${{ steps.matrix.outputs.publish_matrix }}
+      publish_needed: ${{ steps.matrix.outputs.publish_needed }}
       requires_toolchain_ci: ${{ steps.classify.outputs.requires_toolchain_ci }}
     steps:
       - name: Check out repository
@@ -55,19 +57,72 @@ jobs:
           scripts/classify-changes.sh --revisions "$base_sha" "$head_sha" \
             >> "$GITHUB_OUTPUT"
 
-      - name: Build supported version matrix
+      - name: Build supported version matrices
         id: matrix
         shell: bash
+        env:
+          REQUIRES_TOOLCHAIN_CI: ${{ steps.classify.outputs.requires_toolchain_ci }}
         run: |
           set -euo pipefail
           matrix="$(jq -c '{include: [.supported_versions[] | {version, channel, revision, archive, archive_sha256}]}' supported_version.json)"
+          publish_matrix="$matrix"
+          publish_needed=false
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            publish_needed=true
+          elif [[ "$REQUIRES_TOOLCHAIN_CI" == "true" ]]; then
+            base_sha="$(jq -er '.before' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
+            head_sha="$(jq -er '.after' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
+            manifest_only=false
+            if [[ "$base_sha" =~ ^[[:xdigit:]]{40}$ && "$head_sha" =~ ^[[:xdigit:]]{40}$ ]] \
+              && git rev-parse --verify "${base_sha}^{commit}" >/dev/null 2>&1 \
+              && git rev-parse --verify "${head_sha}^{commit}" >/dev/null 2>&1; then
+              diff_file="$(mktemp "${TMPDIR:-/tmp}/publish-matrix.XXXXXX")"
+              trap 'rm -f -- "$diff_file"' EXIT
+              if git diff --name-only --no-renames -z "$base_sha" "$head_sha" -- > "$diff_file"; then
+                path_count=0
+                has_manifest=false
+                manifest_only=true
+                while IFS= read -r -d '' path; do
+                  path_count=$((path_count + 1))
+                  case "$path" in
+                    supported_version.json) has_manifest=true ;;
+                    README.md) ;;
+                    *) manifest_only=false ;;
+                  esac
+                done < "$diff_file"
+                [[ "$has_manifest" == true && "$path_count" -gt 0 ]] || manifest_only=false
+              fi
+
+              if [[ "$manifest_only" == true ]]; then
+                old_manifest="$(mktemp "${TMPDIR:-/tmp}/publish-old-manifest.XXXXXX")"
+                trap 'rm -f -- "$diff_file" "$old_manifest"' EXIT
+                if git show "$base_sha:supported_version.json" > "$old_manifest" \
+                  && jq -e 'type == "object" and (.supported_versions | type == "array")' \
+                    "$old_manifest" >/dev/null; then
+                  publish_matrix="$(scripts/publish-matrix.sh "$old_manifest" supported_version.json)"
+                  if [[ "$(jq -er '.include | length' <<< "$publish_matrix")" -gt 0 ]]; then
+                    publish_needed=true
+                  fi
+                else
+                  publish_needed=true
+                fi
+              else
+                publish_needed=true
+              fi
+            else
+              publish_needed=true
+            fi
+          fi
+
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+          printf 'publish_matrix=%s\n' "$publish_matrix" >> "$GITHUB_OUTPUT"
+          printf 'publish_needed=%s\n' "$publish_needed" >> "$GITHUB_OUTPUT"
 
   publish:
     if: >-
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-      needs.manifest.outputs.requires_toolchain_ci == 'true')
+      needs.manifest.outputs.publish_needed == 'true'
     needs: manifest
     runs-on: ubuntu-24.04
     permissions:
@@ -78,7 +133,7 @@ jobs:
       artifact-metadata: write
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.manifest.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.manifest.outputs.publish_matrix) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

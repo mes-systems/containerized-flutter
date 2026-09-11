@@ -1,0 +1,197 @@
+name: Flutter release watcher
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: flutter-release-watcher
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_MANIFEST_URL: https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
+  WATCHER_BRANCH: automation/flutter-support-update
+  PR_TITLE: "chore: refresh supported Flutter releases"
+  ANOMALY_TITLE: "security: Flutter release metadata anomaly detected"
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download official Flutter release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl \
+            --fail \
+            --show-error \
+            --location \
+            --retry 5 \
+            --retry-all-errors \
+            --output releases_linux.json \
+            "$RELEASE_MANIFEST_URL"
+
+      - name: Validate release manifest structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e 'type == "object" and (.releases | type == "array")' \
+            releases_linux.json >/dev/null
+
+      - name: Mint short-lived watcher GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.FLUTTER_WATCHER_APP_ID }}
+          private-key: ${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: containerized-flutter
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-metadata: read
+
+      - name: Configure GitHub App credentials
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh auth setup-git
+
+      - name: Base watcher branch on current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git fetch --no-tags origin \
+            "refs/heads/$WATCHER_BRANCH:refs/remotes/origin/$WATCHER_BRANCH" \
+            || true
+          git checkout -B "$WATCHER_BRANCH" origin/main
+
+      - name: Calculate supported Flutter release update
+        id: update
+        shell: bash
+        env:
+          SUMMARY_JSON: ${{ runner.temp }}/flutter-release-summary.json
+          SUMMARY_MARKDOWN: ${{ runner.temp }}/flutter-release-summary.md
+        run: |
+          set +e
+          python3 scripts/update-supported-versions.py \
+            --write \
+            --manifest supported_version.json \
+            --releases releases_linux.json \
+            --readme README.md \
+            --summary-json "$SUMMARY_JSON" \
+            --summary-markdown "$SUMMARY_MARKDOWN"
+          updater_status=$?
+          status=error
+          update_needed=false
+          if [[ -s "$SUMMARY_JSON" ]]; then
+            status="$(jq -er '.status' "$SUMMARY_JSON" 2>/dev/null || true)"
+            update_needed="$(jq -er '.update_needed' "$SUMMARY_JSON" 2>/dev/null || true)"
+          fi
+          printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          printf 'update_needed=%s\n' "$update_needed" >> "$GITHUB_OUTPUT"
+          exit "$updater_status"
+
+      - name: Add watcher result to job summary
+        if: always()
+        env:
+          SUMMARY_MARKDOWN: ${{ runner.temp }}/flutter-release-summary.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -s "$SUMMARY_MARKDOWN" ]]; then
+            cat "$SUMMARY_MARKDOWN" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Flutter release watcher did not produce a summary.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run repository guardrails and tests
+        id: guardrails
+        if: steps.update.outputs.status == 'update'
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/validate-supported-versions.sh supported_version.json
+          tests/scripts_test.sh
+          git diff --check
+
+      - name: Commit and push watcher branch
+        if: steps.update.outputs.status == 'update' && steps.guardrails.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "flutter-release-watcher[bot]"
+          git config user.email "flutter-release-watcher[bot]@users.noreply.github.com"
+          if git show-ref --verify --quiet "refs/remotes/origin/$WATCHER_BRANCH" \
+            && git diff --quiet "refs/remotes/origin/$WATCHER_BRANCH" --; then
+            printf 'watcher branch already matches current main and generated files\n'
+            exit 0
+          fi
+          git add supported_version.json README.md
+          git diff --cached --check
+          git commit -m "$PR_TITLE"
+
+          expected_remote=""
+          if git show-ref --verify --quiet "refs/remotes/origin/$WATCHER_BRANCH"; then
+            expected_remote="$(git rev-parse "refs/remotes/origin/$WATCHER_BRANCH")"
+          fi
+          git push \
+            --force-with-lease="refs/heads/$WATCHER_BRANCH:$expected_remote" \
+            origin "HEAD:refs/heads/$WATCHER_BRANCH"
+
+      - name: Create or update watcher pull request
+        if: steps.update.outputs.status == 'update' && steps.guardrails.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SUMMARY_MARKDOWN: ${{ runner.temp }}/flutter-release-summary.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="$(gh pr list \
+            --state open \
+            --base main \
+            --head "$WATCHER_BRANCH" \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [[ -n "$pr_number" ]]; then
+            gh pr edit "$pr_number" --title "$PR_TITLE" --body-file "$SUMMARY_MARKDOWN"
+          else
+            gh pr create \
+              --base main \
+              --head "$WATCHER_BRANCH" \
+              --title "$PR_TITLE" \
+              --body-file "$SUMMARY_MARKDOWN"
+          fi
+
+      - name: Create or update deduplicated anomaly issue
+        if: always() && steps.update.outputs.status == 'security_anomaly'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SUMMARY_MARKDOWN: ${{ runner.temp }}/flutter-release-summary.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_number="$(gh issue list \
+            --state open \
+            --limit 100 \
+            --json number,title \
+            | jq -r --arg title "$ANOMALY_TITLE" \
+              '[.[] | select(.title == $title)][0].number // empty')"
+          if [[ -n "$issue_number" ]]; then
+            gh issue edit "$issue_number" --title "$ANOMALY_TITLE" --body-file "$SUMMARY_MARKDOWN"
+          else
+            gh issue create --title "$ANOMALY_TITLE" --body-file "$SUMMARY_MARKDOWN"
+          fi
