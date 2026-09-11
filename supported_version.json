@@ -1,6 +1,11 @@
 {
   "schema": 1,
-  "versions": [
+  "support_policy": {
+    "channel": "stable",
+    "minor_lines": 4,
+    "selection": "latest_patch_per_minor"
+  },
+  "supported_versions": [
     {
       "version": "3.44.2",
       "channel": "stable",

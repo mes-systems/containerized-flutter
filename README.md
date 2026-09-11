@@ -6,9 +6,11 @@ release metadata and archive digest, and publishes versioned images to GHCR.
 
 ## Trust model
 
-The first release uses versions.json as the maintainer-reviewed persistent
-trust root. Each entry pins the Flutter version, stable channel, official
-archive path, Git revision, and archive SHA256.
+The first release uses `supported_version.json` as the maintainer-reviewed
+persistent trust root for the currently supported releases. It is an active
+support manifest, not an archive of upstream Flutter history. Each entry pins
+the Flutter version, stable channel, official archive path, Git revision, and
+archive SHA256.
 
 scripts/verify-release.sh downloads the official
 releases_linux.json, requires exactly one matching release, checks that all
@@ -33,6 +35,19 @@ image is pushed to GHCR and receives a GitHub Artifact Attestation bound to its
 exact OCI digest.
 
 ## Supported releases
+
+Containerized Flutter actively maintains the latest patch release of up to four
+recent stable Flutter minor release lines. The policy is encoded in
+`supported_version.json` as `minor_lines: 4` and
+`selection: latest_patch_per_minor`.
+
+A new patch release for an existing minor line replaces its current entry. A
+new stable minor line adds its newest release; once four lines are supported,
+the oldest line is retired. Superseded or retired releases are removed from
+the active support manifest and are no longer rebuilt when the base image or
+packaging changes. Previously published image tags and OCI digests remain
+available in GHCR, but there is no ongoing rebuild/support guarantee for those
+releases.
 
 | Flutter | Channel | Git revision | SDK archive SHA256 |
 | --- | --- | --- | --- |
@@ -123,19 +138,22 @@ files into the repository checkout.
 
 ## Adding a Flutter release
 
-Add one entry to versions.json with the official release version, stable
-channel, 40-character Git revision, official archive path, and 64-character
-SHA256. Obtain the revision, archive path, and SHA256 from the official
-Flutter release infrastructure; do not guess or copy a digest from an
+Add or replace one entry in `supported_version.json` with the latest patch for
+an actively supported stable minor line. Include the official release version,
+stable channel, 40-character Git revision, official archive path, and
+64-character SHA256. Obtain the revision, archive path, and SHA256 from the
+official Flutter release infrastructure; do not guess or copy a digest from an
 unverified file. Run:
 
 ```
-scripts/validate-versions.sh versions.json
+scripts/validate-supported-versions.sh supported_version.json
 ```
 
-The same release-manifest and local archive checks run in CI and before
-publication. Flutter upgrades are intentionally curated rather than automated
-by Dependabot because each new release adds a new upstream release contract.
+The manifest is intentionally limited to the active support window rather
+than expanded into a historical release list. The same release-manifest and
+local archive checks run in CI and before publication. Flutter upgrades are
+intentionally curated rather than automated by Dependabot because each new
+release adds a new upstream release contract.
 
 Dependabot checks the pinned Ubuntu 24.04 Docker digest weekly. When Ubuntu
 changes, its short digest changes the public image tags, while previous tags

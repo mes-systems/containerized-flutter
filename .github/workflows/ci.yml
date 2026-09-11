@@ -18,18 +18,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate version manifest
-        run: scripts/validate-versions.sh versions.json
+      - name: Validate supported version manifest
+        run: scripts/validate-supported-versions.sh supported_version.json
 
       - name: Run script guardrails
         run: tests/scripts_test.sh
 
-      - name: Build version matrix
+      - name: Build supported version matrix
         id: matrix
         shell: bash
         run: |
           set -euo pipefail
-          matrix="$(jq -c '{include: [.versions[] | {version, channel, revision, archive, archive_sha256}]}' versions.json)"
+          matrix="$(jq -c '{include: [.supported_versions[] | {version, channel, revision, archive, archive_sha256}]}' supported_version.json)"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   build:

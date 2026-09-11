@@ -20,19 +20,26 @@ assert_fails() {
   fi
 }
 
-"$ROOT_DIR/scripts/validate-versions.sh" "$ROOT_DIR/versions.json"
+manifest="$ROOT_DIR/supported_version.json"
+validator="$ROOT_DIR/scripts/validate-supported-versions.sh"
+
+"$validator" "$manifest"
 
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "$test_dir"' EXIT
 for filter in \
   '.schema = 2' \
-  '.versions[1].version = .versions[0].version' \
-  '.versions[0].version = ""' \
-  '.versions[0].channel = "beta"' \
-  '.versions[0].revision = "not-a-revision"'
+  '.support_policy.selection = "all_releases"' \
+  '.supported_versions = []' \
+  '.support_policy.minor_lines = 1' \
+  '.supported_versions[1].version = .supported_versions[0].version' \
+  '.supported_versions[1].version = "3.44.3" | .supported_versions[1].archive = "stable/linux/flutter_linux_3.44.3-stable.tar.xz"' \
+  '.supported_versions[0].version = ""' \
+  '.supported_versions[0].channel = "beta"' \
+  '.supported_versions[0].revision = "not-a-revision"'
 do
-  jq "$filter" "$ROOT_DIR/versions.json" > "$test_dir/invalid.json"
-  assert_fails "$ROOT_DIR/scripts/validate-versions.sh" "$test_dir/invalid.json"
+  jq "$filter" "$manifest" > "$test_dir/invalid.json"
+  assert_fails "$validator" "$test_dir/invalid.json"
 done
 
 from_line="$(awk '$1 == "FROM" { print; count++ } END { if (count != 1) exit 1 }' \

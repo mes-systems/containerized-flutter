@@ -66,13 +66,13 @@ expected_archive="$channel/linux/flutter_linux_"$version"-"$channel".tar.xz"
 [[ "$release_revision" == "$expected_revision" ]] || fail "revision differs from official manifest"
 [[ "$release_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || fail "official manifest has an invalid SHA256"
 [[ "$release_sha256" == "$expected_archive_sha256" ]] \
-  || fail "official manifest SHA256 differs from versions.json"
+  || fail "official manifest SHA256 differs from supported_version.json"
 
 # Future hardening belongs here: authenticate the adjacent SLSA/DSSE bundle
 # before accepting the release-manifest SHA256 as the upstream trust root.
 actual_sha256="$(sha256sum -- "$archive_path" | awk '{print $1}')"
 [[ "$actual_sha256" == "$expected_archive_sha256" ]] \
-  || fail "local archive SHA256 differs from versions.json"
+  || fail "local archive SHA256 differs from supported_version.json"
 
 if [[ -n "$output_file" ]]; then
   output_parent="$(dirname -- "$output_file")"
