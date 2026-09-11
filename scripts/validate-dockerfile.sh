@@ -42,7 +42,7 @@ while IFS= read -r line; do
         fi
       done
       ;;
-    COPY)
+    COPY|ADD)
       ((stage >= 0)) || fail 'COPY appears before the first FROM'
       stage_copy_lines[stage]+="$line"$'\n'
       ;;
@@ -74,7 +74,11 @@ while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   instruction="${line%%[[:space:]]*}"
   instruction_upper="$(printf '%s' "$instruction" | tr '[:lower:]' '[:upper:]')"
-  [[ "$instruction_upper" == COPY ]] || continue
+  case "$instruction_upper" in
+    COPY) ;;
+    ADD) fail 'final stage must not use ADD' ;;
+    *) continue ;;
+  esac
   rest="${line:${#instruction}}"
   read -r -a copy_args <<< "$rest"
   copy_from=""
@@ -87,14 +91,10 @@ while IFS= read -r line; do
     esac
   done
 
-  line_lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
-  [[ "$line_lower" != *'.tar.xz'* ]] \
-    || fail 'Flutter archive must not be copied in the final stage'
-
-  if [[ "$copy_from" == flutter-sdk && "${#operands[@]}" == 2 \
-    && "${operands[0]}" == /opt/flutter && "${operands[1]}" == /opt/flutter ]]; then
-    final_sdk_copy=true
-  fi
+  [[ "$copy_from" == flutter-sdk && "${#operands[@]}" == 2 \
+    && "${operands[0]}" == /opt/flutter && "${operands[1]}" == /opt/flutter ]] \
+    || fail 'final stage may only COPY /opt/flutter from flutter-sdk'
+  final_sdk_copy=true
 done <<< "$final_copy_lines"
 
 [[ "$final_sdk_copy" == true ]] \

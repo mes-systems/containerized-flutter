@@ -379,13 +379,18 @@ printf 'FROM ubuntu:24.04\n' > "$test_dir/Dockerfile"
 assert_fails "$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
   c9a6c484230f8b5e408ec57be1ef71dee1e77020 "$test_dir/Dockerfile"
 
-printf '%s\n' \
-  'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS flutter-sdk' \
-  'COPY .artifacts/flutter-sdk.tar.xz /tmp/flutter-sdk.tar.xz' \
-  'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254' \
-  'COPY .artifacts/flutter-sdk.tar.xz /tmp/flutter-sdk.tar.xz' \
-  > "$test_dir/archive-in-final.Dockerfile"
-assert_fails "$dockerfile_guard" "$test_dir/archive-in-final.Dockerfile"
+for final_input in \
+  'COPY . /workspace' \
+  'COPY .artifacts/ /tmp/artifacts/' \
+  'ADD .artifacts/flutter-sdk.tar.xz /tmp/flutter-sdk.tar.xz'; do
+  printf '%s\n' \
+    'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS flutter-sdk' \
+    'COPY .artifacts/flutter-sdk.tar.xz /tmp/flutter-sdk.tar.xz' \
+    'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254' \
+    "$final_input" \
+    > "$test_dir/context-input-in-final.Dockerfile"
+  assert_fails "$dockerfile_guard" "$test_dir/context-input-in-final.Dockerfile"
+done
 
 printf '%s\n' \
   'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS flutter-sdk' \
@@ -410,6 +415,7 @@ assert_no_text_match 'empty Flutter attestation bundle' "$acquire_source"
 assert_contains 'optional Flutter attestation bundle unavailable' "$acquire_source"
 
 publish_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/publish.yml")"
+publish_cleanup_source="$(sed -n '/^      - name: Remove tested image/,$p' <<< "$publish_source")"
 publication_source="$(sed -n '1,280p' "$publication_classifier")"
 [[ "$(grep -c '^classify_path() {' <<< "$publication_source")" == 1 ]] \
   || fail 'publication path policy must have one classify_path helper'
@@ -423,14 +429,19 @@ assert_contains 'provenance: false' "$(sed -n '1,240p' "$ROOT_DIR/.github/workfl
 assert_contains 'push-to-registry: true' "$publish_source"
 assert_contains 'Remove tested image' "$(sed -n '1,240p' "$ROOT_DIR/.github/workflows/ci.yml")"
 assert_contains 'Remove tested image' "$publish_source"
+assert_contains 'test image leaked after cleanup' "$publish_cleanup_source"
+assert_no_text_match '\|\| true' "$publish_cleanup_source"
 
 ci_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/ci.yml")"
+ci_cleanup_source="$(sed -n '/^      - name: Remove tested image/,/^  ci-gate:/p' <<< "$ci_source")"
 assert_contains 'scripts/classify-changes.sh --revisions' "$ci_source"
 assert_contains '.pull_request.base.sha' "$ci_source"
 assert_contains '.pull_request.head.sha' "$ci_source"
 assert_contains 'if: needs.manifest.outputs.requires_toolchain_ci == '\''true'\''' "$ci_source"
 assert_contains 'name: CI gate' "$ci_source"
 assert_contains 'if: always()' "$ci_source"
+assert_contains 'test image leaked after cleanup' "$ci_cleanup_source"
+assert_no_text_match '\|\| true' "$ci_cleanup_source"
 assert_no_text_match 'ref:.*pull_request\.head\.sha' "$ci_source"
 assert_no_text_match 'paths-ignore:' "$ci_source"
 
