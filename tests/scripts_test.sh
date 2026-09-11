@@ -48,11 +48,13 @@ validator="$ROOT_DIR/scripts/validate-supported-versions.sh"
 classifier="$ROOT_DIR/scripts/classify-changes.sh"
 publication_classifier="$ROOT_DIR/scripts/classify-publication.sh"
 publish_matrix_script="$ROOT_DIR/scripts/publish-matrix.sh"
+dockerfile_guard="$ROOT_DIR/scripts/validate-dockerfile.sh"
 
 command -v grep >/dev/null 2>&1 || fail 'required command not found: grep'
 
 "$validator" "$manifest"
 python3 "$ROOT_DIR/tests/test_update_supported_versions.py"
+"$dockerfile_guard" "$ROOT_DIR/Dockerfile"
 
 assert_classification() {
   local expected="$1"
@@ -361,18 +363,14 @@ if "$validator" "$test_dir/duplicate-minor.json" > "$duplicate_minor_output" 2>&
 fi
 assert_contains 'duplicate Flutter minor line' "$(< "$duplicate_minor_output")"
 
-from_line="$(awk '$1 == "FROM" { print; count++ } END { if (count != 1) exit 1 }' \
-  "$ROOT_DIR/Dockerfile")" || fail 'Dockerfile must have one FROM line'
-base_fields="$(printf '%s\n' "$from_line" | sed -nE \
-  's/^FROM[[:space:]]+ubuntu:([0-9]+\.[0-9]+)@sha256:([0-9a-fA-F]{64})[[:space:]]*$/\1 \2/p')"
-[[ "$base_fields" =~ ^24\.04[[:space:]][0-9a-fA-F]{64}$ ]] \
-  || fail 'Dockerfile must pin Ubuntu 24.04 by a full SHA256'
-ubuntu_version="${base_fields%% *}"
-ubuntu_digest="${base_fields#* }"
-ubuntu_digest_short="${ubuntu_digest:0:12}"
-
 metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
   c9a6c484230f8b5e408ec57be1ef71dee1e77020 "$ROOT_DIR/Dockerfile")"
+assert_contains 'ubuntu_version=24.04' "$metadata"
+ubuntu_version="$(sed -n 's/^ubuntu_version=//p' <<< "$metadata")"
+ubuntu_digest="$(sed -n 's/^ubuntu_digest=sha256://p' <<< "$metadata")"
+ubuntu_digest_short="${ubuntu_digest:0:12}"
+[[ "$ubuntu_digest" =~ ^[0-9a-fA-F]{64}$ ]] \
+  || fail 'Dockerfile must pin Ubuntu by a full SHA256'
 assert_contains "tag=3.47.3-ubuntu${ubuntu_version}-${ubuntu_digest_short}" "$metadata"
 assert_contains "build_tag=3.47.3-ubuntu${ubuntu_version}-${ubuntu_digest_short}-gc9a6c484230f" \
   "$metadata"
@@ -380,6 +378,21 @@ assert_contains "build_tag=3.47.3-ubuntu${ubuntu_version}-${ubuntu_digest_short}
 printf 'FROM ubuntu:24.04\n' > "$test_dir/Dockerfile"
 assert_fails "$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
   c9a6c484230f8b5e408ec57be1ef71dee1e77020 "$test_dir/Dockerfile"
+
+printf '%s\n' \
+  'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS flutter-sdk' \
+  'COPY .artifacts/flutter-sdk.tar.xz /tmp/flutter-sdk.tar.xz' \
+  'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254' \
+  'COPY .artifacts/flutter-sdk.tar.xz /tmp/flutter-sdk.tar.xz' \
+  > "$test_dir/archive-in-final.Dockerfile"
+assert_fails "$dockerfile_guard" "$test_dir/archive-in-final.Dockerfile"
+
+printf '%s\n' \
+  'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS flutter-sdk' \
+  'FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254' \
+  'COPY --from=flutter-sdk /opt/not-flutter /opt/flutter' \
+  > "$test_dir/missing-sdk-copy.Dockerfile"
+assert_fails "$dockerfile_guard" "$test_dir/missing-sdk-copy.Dockerfile"
 
 assert_fails "$ROOT_DIR/scripts/acquire-flutter.sh" 3.47.3 beta "$ROOT_DIR/.artifacts"
 assert_fails "$ROOT_DIR/scripts/verify-release.sh" 3.47.3 stable \
@@ -408,6 +421,8 @@ assert_contains 'docker image inspect' "$publish_source"
 assert_contains '.RepoDigests' "$publish_source"
 assert_contains 'provenance: false' "$(sed -n '1,240p' "$ROOT_DIR/.github/workflows/ci.yml")"
 assert_contains 'push-to-registry: true' "$publish_source"
+assert_contains 'Remove tested image' "$(sed -n '1,240p' "$ROOT_DIR/.github/workflows/ci.yml")"
+assert_contains 'Remove tested image' "$publish_source"
 
 ci_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/ci.yml")"
 assert_contains 'scripts/classify-changes.sh --revisions' "$ci_source"

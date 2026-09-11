@@ -119,6 +119,13 @@ jobs:
             "${{ matrix.version }}" \
             "${{ matrix.revision }}"
 
+      - name: Remove tested image
+        if: always()
+        run: |
+          docker image rm -f \
+            ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }} \
+            >/dev/null 2>&1 || true
+
   ci-gate:
     name: CI gate
     if: always()

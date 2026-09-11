@@ -19,12 +19,35 @@ fail() {
 [[ "$repository_sha" =~ ^[0-9a-fA-F]{40}$ ]] || fail "repository SHA must be 40 hexadecimal characters"
 [[ -f "$dockerfile" ]] || fail "Dockerfile not found: $dockerfile"
 
-from_line="$(awk '$1 == "FROM" { print; count++ } END { if (count != 1) exit 1 }' "$dockerfile")" \
-  || fail "Dockerfile must have exactly one FROM line"
-base_fields="$(printf '%s\n' "$from_line" | sed -nE \
-  's/^FROM[[:space:]]+ubuntu:([0-9]+\.[0-9]+)@sha256:([0-9a-fA-F]{64})[[:space:]]*$/\1 \2/p')"
-[[ "$base_fields" =~ ^[0-9]+\.[0-9]+[[:space:]][0-9a-fA-F]{64}$ ]] \
-  || fail "FROM must be a literal ubuntu version pinned by a full SHA256"
+from_images="$(awk '
+  $1 == "FROM" {
+    image = ""
+    for (i = 2; i <= NF; i++) {
+      if ($i !~ /^--/) {
+        image = $i
+        break
+      }
+    }
+    if (image == "") exit 1
+    print image
+  }
+' "$dockerfile")" || fail "Dockerfile must contain valid FROM instructions"
+[[ -n "$from_images" ]] || fail "Dockerfile must contain at least one FROM instruction"
+
+base_fields="$(printf '%s\n' "$from_images" | sed -nE \
+  's/^ubuntu:([0-9]+\.[0-9]+)@sha256:([0-9a-fA-F]{64})$/\1 \2/p')"
+from_count="$(printf '%s\n' "$from_images" | awk 'NF { count++ } END { print count + 0 }')"
+parsed_count="$(printf '%s\n' "$base_fields" | awk 'NF { count++ } END { print count + 0 }')"
+[[ "$from_count" == "$parsed_count" ]] \
+  || fail "every FROM must be a literal ubuntu version pinned by a full SHA256"
+base_fields="$(printf '%s\n' "$base_fields" | awk '
+  NR == 1 { first = $0 }
+  $0 != first { mismatch = 1 }
+  END {
+    if (NR == 0 || mismatch) exit 1
+    print first
+  }
+')" || fail "all FROM instructions must use the same pinned Ubuntu base"
 
 ubuntu_version="$(printf '%s\n' "$base_fields" | awk '{print $1}')"
 ubuntu_digest="$(printf '%s\n' "$base_fields" | awk '{print $2}' | tr '[:upper:]' '[:lower:]')"

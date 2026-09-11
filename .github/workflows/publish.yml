@@ -178,3 +178,11 @@ jobs:
           push-to-registry: true
           create-storage-record: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove tested image
+        if: always()
+        run: |
+          docker image rm -f \
+            "${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.tag }}" \
+            "${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.build_tag }}" \
+            >/dev/null 2>&1 || true
