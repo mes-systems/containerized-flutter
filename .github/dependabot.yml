@@ -7,7 +7,7 @@ updates:
     ignore:
       - dependency-name: ubuntu
         versions:
-          - ">=25"
+          - "> 24.04"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
