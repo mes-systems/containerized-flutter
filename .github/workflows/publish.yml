@@ -87,16 +87,18 @@ jobs:
       - name: Acquire Flutter release
         run: |
           set -euo pipefail
-          scripts/acquire-flutter.sh "${{ matrix.version }}" "${{ matrix.channel }}" .artifacts
+          scripts/acquire-flutter.sh "${{ matrix.archive }}" .artifacts
 
       - name: Verify Flutter release
         id: verify
         run: |
           set -euo pipefail
           scripts/verify-release.sh \
+            "${{ matrix.platform }}" \
             "${{ matrix.version }}" \
             "${{ matrix.channel }}" \
             "${{ matrix.revision }}" \
+            "${{ matrix.archive }}" \
             "${{ matrix.archive_sha256 }}" \
             .artifacts/flutter-sdk.tar.xz
 
@@ -112,15 +114,15 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           load: true
           push: false
           provenance: false
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.tag }}
             ${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.build_tag }}
-          cache-from: type=gha,scope=flutter-${{ matrix.version }}
-          cache-to: type=gha,mode=max,scope=flutter-${{ matrix.version }}
+          cache-from: type=gha,scope=flutter-${{ matrix.version }}-${{ matrix.platform_slug }}
+          cache-to: type=gha,mode=max,scope=flutter-${{ matrix.version }}-${{ matrix.platform_slug }}
           build-args: |
             FLUTTER_VERSION=${{ matrix.version }}
             FLUTTER_CHANNEL=${{ matrix.channel }}

@@ -1,20 +1,24 @@
 # Containerized Flutter
 
-This repository builds a reusable Linux amd64 Flutter SDK/toolchain image. It
-acquires official Flutter release archives before the Docker build, checks the
-release metadata and archive digest, and publishes versioned images to GHCR.
+This repository builds a reusable Linux amd64 Flutter SDK/toolchain image. Its
+Flutter trust manifest and build metadata are platform-aware, while the active
+image platform remains linux/amd64 only. It acquires official Flutter release
+archives before the Docker build, checks the release metadata and archive
+digest, and publishes versioned images to GHCR.
 
 ## Trust model
 
 The first release uses `supported_version.json` as the maintainer-reviewed
 persistent trust root for the currently supported releases. It is an active
-support manifest, not an archive of upstream Flutter history. Each entry pins
-the Flutter version, stable channel, official archive path, Git revision, and
-archive SHA256.
+support manifest, not an archive of upstream Flutter history. The policy pins
+the active platform set (`linux/amd64`). Each entry pins the Flutter version,
+stable channel, and one common Git revision; its platform artifact then pins
+the upstream architecture, official archive path, and archive SHA256.
 
 scripts/verify-release.sh downloads the official
-releases_linux.json, requires exactly one matching stable Linux x64 release, checks that all
-of its release metadata matches the pinned entry, and independently hashes the
+releases_linux.json, maps the requested platform to its upstream architecture,
+requires exactly one matching stable release, checks that all of its release
+metadata matches the pinned platform artifact, and independently hashes the
 already acquired archive. The Dockerfile checks that same digest again before
 extracting the SDK, then verifies the extracted Git revision and Flutter tag.
 
@@ -39,7 +43,7 @@ exact OCI digest.
 Containerized Flutter actively maintains the latest patch release of up to four
 active stable Flutter minor release lines. The policy is encoded in
 `supported_version.json` as `minor_lines: 4` and
-`selection: latest_patch_per_minor`.
+`selection: latest_patch_per_minor`, with `platforms: ["linux/amd64"]`.
 
 A new patch release for an existing minor line replaces its current entry. A
 new stable minor line newer than the active window adds its newest release;
@@ -51,14 +55,15 @@ available in GHCR, but there is no ongoing rebuild/support guarantee for those
 releases.
 
 <!-- BEGIN GENERATED SUPPORTED FLUTTER RELEASES -->
-| Flutter | Channel | Git revision | SDK archive SHA256 |
-| --- | --- | --- | --- |
-| 3.41.9 | stable | `00b0c91f06209d9e4a41f71b7a512d6eb3b9c694` | `cf2631dde02570733921a530f47a96abe896b5e334682d2743c29530ea88bb2e` |
-| 3.44.9 | stable | `6b182d2c7585eba26d4edce0f97630effd256c33` | `a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb` |
-| 3.47.3 | stable | `e8113bf45620cbeb8aff64947ee4c93e16adb4cf` | `988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1` |
+| Flutter | Platform | Channel | Git revision | SDK archive SHA256 |
+| --- | --- | --- | --- | --- |
+| 3.41.9 | linux/amd64 | stable | `00b0c91f06209d9e4a41f71b7a512d6eb3b9c694` | `cf2631dde02570733921a530f47a96abe896b5e334682d2743c29530ea88bb2e` |
+| 3.44.9 | linux/amd64 | stable | `6b182d2c7585eba26d4edce0f97630effd256c33` | `a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb` |
+| 3.47.3 | linux/amd64 | stable | `e8113bf45620cbeb8aff64947ee4c93e16adb4cf` | `988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1` |
 <!-- END GENERATED SUPPORTED FLUTTER RELEASES -->
 
-The initial image target is Linux amd64 only.
+The active image target is linux/amd64 only. Linux arm64 is not yet supported,
+and multi-platform OCI publication is not part of this release.
 
 ## Images
 
@@ -100,11 +105,15 @@ Upstream release verification is run by both pull-request CI and the trusted
 main publication workflow. Both workflows use the same repository scripts:
 
 ```
-scripts/acquire-flutter.sh 3.47.3 stable .artifacts
+scripts/acquire-flutter.sh \
+  stable/linux/flutter_linux_3.47.3-stable.tar.xz \
+  .artifacts
 scripts/verify-release.sh \
+  linux/amd64 \
   3.47.3 \
   stable \
   e8113bf45620cbeb8aff64947ee4c93e16adb4cf \
+  stable/linux/flutter_linux_3.47.3-stable.tar.xz \
   988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1 \
   .artifacts/flutter-sdk.tar.xz
 ```
@@ -154,9 +163,11 @@ scripts/validate-supported-versions.sh supported_version.json
 ```
 
 The manifest is intentionally limited to the active support window rather
-than expanded into a historical release list. A daily watcher discovers valid
-stable Linux x64 releases from the official release manifest and proposes
-manifest and README updates in one pull request. Acceptance remains
+than expanded into a historical release list. Each Flutter version has common
+release metadata plus one artifact for every policy platform. A daily watcher
+discovers valid stable artifacts for the active platform set from the official
+release manifest and proposes manifest and README updates in one pull request.
+Acceptance remains
 maintainer-reviewed through that PR; the watcher never silently changes the
 trust-root metadata for an already supported exact release. The same
 release-manifest and local archive checks run in CI and before publication.

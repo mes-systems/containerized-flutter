@@ -44,13 +44,18 @@ def release(version: str, revision: str, sha256: str, architecture: str = "x64")
     }
 
 
-def supported_entry(release_record: dict[str, str]) -> dict[str, str]:
+def supported_entry(release_record: dict[str, str]) -> dict[str, object]:
     return {
         "version": release_record["version"],
         "channel": release_record["channel"],
         "revision": release_record["hash"],
-        "archive": release_record["archive"],
-        "archive_sha256": release_record["sha256"],
+        "artifacts": {
+            "linux/amd64": {
+                "upstream_arch": "x64",
+                "archive": release_record["archive"],
+                "archive_sha256": release_record["sha256"],
+            }
+        },
     }
 
 
@@ -110,6 +115,32 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         self.assertFalse(summary["update_needed"])
         self.assertEqual(before["supported_version.json"], (case_dir / "supported_version.json").read_bytes())
         self.assertEqual(before["README.md"], (case_dir / "README.md").read_bytes())
+
+    def test_schema1_is_rejected_as_current_manifest(self):
+        case_dir = self.make_case()
+        manifest = load_fixture("supported_version.json")
+        manifest["schema"] = 1
+        (case_dir / "supported_version.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--check",
+                "--manifest",
+                str(case_dir / "supported_version.json"),
+                "--releases",
+                str(case_dir / "releases_linux.json"),
+                "--readme",
+                str(case_dir / "README.md"),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("schema must be 2", result.stderr)
 
     def test_patch_replaces_patch_in_same_minor(self):
         releases = load_fixture("releases_linux.json")
@@ -238,6 +269,7 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(summary["status"], "security_anomaly")
         self.assertEqual(summary["anomalies"][0]["kind"], "duplicate_upstream_release")
+        self.assertEqual(summary["anomalies"][0]["platform"], "linux/amd64")
         self.assertEqual(summary["anomalies"][0]["old"]["version"], "1.2.3")
         self.assertIn("SECURITY ANOMALY", markdown)
         self.assertEqual(before["supported_version.json"], (case_dir / "supported_version.json").read_bytes())
@@ -399,6 +431,7 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(summary["status"], "security_anomaly")
                 self.assertEqual(summary["anomalies"][0]["version"], "1.2.3")
+                self.assertEqual(summary["anomalies"][0]["platform"], "linux/amd64")
                 self.assertEqual(summary["anomalies"][0]["upstream"][upstream_fields[field]], value)
                 self.assertIn(upstream_fields[field], summary["anomalies"][0]["changed_fields"])
                 self.assertEqual(before_manifest, (case_dir / "supported_version.json").read_bytes())
@@ -412,6 +445,7 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(summary["anomalies"][0]["kind"], "supported_release_disappeared")
         self.assertEqual(summary["anomalies"][0]["old"]["version"], "1.2.3")
+        self.assertEqual(summary["anomalies"][0]["platform"], "linux/amd64")
 
     def test_supported_x64_disappearance_is_anomaly_even_if_arm64_remains(self):
         releases = load_fixture("releases_linux.json")
@@ -447,10 +481,11 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         generated = readme.split(updater.BEGIN_MARKER, 1)[1].split(updater.END_MARKER, 1)[0]
         expected = "\n" + "\n".join(
             [
-                "| Flutter | Channel | Git revision | SDK archive SHA256 |",
-                "| --- | --- | --- | --- |",
+                "| Flutter | Platform | Channel | Git revision | SDK archive SHA256 |",
+                "| --- | --- | --- | --- | --- |",
                 *(
-                    f"| {entry['version']} | {entry['channel']} | `{entry['revision']}` | `{entry['archive_sha256']}` |"
+                    f"| {entry['version']} | linux/amd64 | {entry['channel']} | `{entry['revision']}` | `"
+                    f"{entry['artifacts']['linux/amd64']['archive_sha256']}` |"
                     for entry in manifest["supported_versions"]
                 ),
             ]

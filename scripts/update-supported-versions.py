@@ -19,7 +19,14 @@ END_MARKER = "<!-- END GENERATED SUPPORTED FLUTTER RELEASES -->"
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-ENTRY_FIELDS = ("version", "channel", "revision", "archive", "archive_sha256")
+COMMON_ENTRY_FIELDS = ("version", "channel", "revision")
+ARTIFACT_FIELDS = ("upstream_arch", "archive", "archive_sha256")
+PLATFORM_SPECS = {
+    "linux/amd64": {
+        "upstream_arch": "x64",
+        "archive_template": "{channel}/linux/flutter_linux_{version}-{channel}.tar.xz",
+    },
+}
 
 
 class UpdateError(Exception):
@@ -51,14 +58,34 @@ def require_string(value: Any, name: str) -> str:
     return value
 
 
+def expected_archive(platform: str, version: str, channel: str) -> str:
+    try:
+        template = PLATFORM_SPECS[platform]["archive_template"]
+    except KeyError as error:
+        raise UpdateError(f"unsupported Flutter platform: {platform}") from error
+    return template.format(version=version, channel=channel)
+
+
+def compact_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    return {field: artifact[field] for field in ARTIFACT_FIELDS}
+
+
 def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    return {field: entry[field] for field in ENTRY_FIELDS}
+    return {
+        **{field: entry[field] for field in COMMON_ENTRY_FIELDS},
+        "artifacts": {
+            platform: compact_artifact(entry["artifacts"][platform])
+            for platform in sorted(entry["artifacts"])
+        },
+    }
 
 
-def raw_release_metadata(release: dict[str, Any]) -> dict[str, Any]:
+def raw_release_metadata(release: dict[str, Any], platform: str) -> dict[str, Any]:
     return {
         "version": release.get("version"),
+        "platform": platform,
         "channel": release.get("channel"),
+        "upstream_arch": release.get("dart_sdk_arch"),
         "dart_sdk_arch": release.get("dart_sdk_arch"),
         "revision": release.get("hash"),
         "archive": release.get("archive"),
@@ -69,8 +96,8 @@ def raw_release_metadata(release: dict[str, Any]) -> dict[str, Any]:
 def validate_supported_manifest(manifest: Any, path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
     if not isinstance(manifest, dict):
         raise UpdateError(f"{path}: manifest must be an object")
-    if type(manifest.get("schema")) is not int or manifest["schema"] != 1:
-        raise UpdateError(f"{path}: schema must be 1")
+    if type(manifest.get("schema")) is not int or manifest["schema"] != 2:
+        raise UpdateError(f"{path}: schema must be 2")
 
     policy = manifest.get("support_policy")
     if not isinstance(policy, dict):
@@ -82,6 +109,15 @@ def validate_supported_manifest(manifest: Any, path: Path) -> tuple[dict[str, An
         raise UpdateError(f"{path}: support_policy.minor_lines must be a positive integer")
     if policy.get("selection") != "latest_patch_per_minor":
         raise UpdateError(f"{path}: unsupported support_policy.selection")
+    platforms = policy.get("platforms")
+    if not isinstance(platforms, list) or not platforms:
+        raise UpdateError(f"{path}: support_policy.platforms must be a non-empty array")
+    if any(not isinstance(platform, str) or not platform for platform in platforms):
+        raise UpdateError(f"{path}: support_policy.platforms must contain non-empty strings")
+    if len(set(platforms)) != len(platforms):
+        raise UpdateError(f"{path}: support_policy.platforms must contain unique platforms")
+    if set(platforms) != set(PLATFORM_SPECS):
+        raise UpdateError(f"{path}: unsupported support_policy.platforms: {platforms}")
 
     supported_versions = manifest.get("supported_versions")
     if not isinstance(supported_versions, list) or not supported_versions:
@@ -95,6 +131,8 @@ def validate_supported_manifest(manifest: Any, path: Path) -> tuple[dict[str, An
     for index, candidate in enumerate(supported_versions):
         if not isinstance(candidate, dict):
             raise UpdateError(f"{path}: supported_versions[{index}] must be an object")
+        if set(candidate) != {"version", "channel", "revision", "artifacts"}:
+            raise UpdateError(f"{path}: invalid fields for supported_versions[{index}]")
         version = require_string(candidate.get("version"), f"{path}: version")
         parsed_version = VERSION_RE.fullmatch(version)
         if parsed_version is None:
@@ -114,25 +152,44 @@ def validate_supported_manifest(manifest: Any, path: Path) -> tuple[dict[str, An
         revision = require_string(candidate.get("revision"), f"{path}: revision for {version}")
         if REVISION_RE.fullmatch(revision) is None:
             raise UpdateError(f"{path}: revision must be exactly 40 hexadecimal characters for {version}")
-        archive = require_string(candidate.get("archive"), f"{path}: archive for {version}")
-        expected_archive = f"{channel}/linux/flutter_linux_{version}-{channel}.tar.xz"
-        if archive != expected_archive:
-            raise UpdateError(f"{path}: archive does not match version/channel for {version}")
-        archive_sha256 = require_string(
-            candidate.get("archive_sha256"), f"{path}: archive_sha256 for {version}"
-        )
-        if SHA256_RE.fullmatch(archive_sha256) is None:
-            raise UpdateError(f"{path}: archive_sha256 must be exactly 64 hexadecimal characters for {version}")
+        artifacts = candidate.get("artifacts")
+        if not isinstance(artifacts, dict):
+            raise UpdateError(f"{path}: artifacts must be an object for {version}")
+        if set(artifacts) != set(platforms):
+            raise UpdateError(f"{path}: artifacts must contain exactly support_policy.platforms for {version}")
+        for platform in platforms:
+            artifact = artifacts[platform]
+            if not isinstance(artifact, dict) or set(artifact) != set(ARTIFACT_FIELDS):
+                raise UpdateError(f"{path}: invalid artifact for {version} on {platform}")
+            upstream_arch = require_string(
+                artifact.get("upstream_arch"), f"{path}: upstream_arch for {version} on {platform}"
+            )
+            if upstream_arch != PLATFORM_SPECS[platform]["upstream_arch"]:
+                raise UpdateError(f"{path}: invalid upstream_arch for {version} on {platform}")
+            archive = require_string(
+                artifact.get("archive"), f"{path}: archive for {version} on {platform}"
+            )
+            if archive != expected_archive(platform, version, channel):
+                raise UpdateError(f"{path}: archive does not match version/channel for {version} on {platform}")
+            archive_sha256 = require_string(
+                artifact.get("archive_sha256"), f"{path}: archive_sha256 for {version} on {platform}"
+            )
+            if SHA256_RE.fullmatch(archive_sha256) is None:
+                raise UpdateError(
+                    f"{path}: archive_sha256 must be exactly 64 hexadecimal characters for {version} on {platform}"
+                )
         entries.append(compact_entry(candidate))
 
     return dict(policy), entries, minor_lines
 
 
-def valid_release(release: Any, policy_channel: str) -> dict[str, Any] | None:
+def valid_release(release: Any, policy_channel: str, platform: str) -> dict[str, Any] | None:
+    spec = PLATFORM_SPECS.get(platform)
     if (
         not isinstance(release, dict)
         or release.get("channel") != policy_channel
-        or release.get("dart_sdk_arch") != "x64"
+        or spec is None
+        or release.get("dart_sdk_arch") != spec["upstream_arch"]
     ):
         return None
     version = release.get("version")
@@ -141,12 +198,12 @@ def valid_release(release: Any, policy_channel: str) -> dict[str, Any] | None:
     revision = release.get("hash")
     archive = release.get("archive")
     archive_sha256 = release.get("sha256")
-    expected_archive = f"{policy_channel}/linux/flutter_linux_{version}-{policy_channel}.tar.xz"
+    expected = expected_archive(platform, version, policy_channel)
     if (
         not isinstance(revision, str)
         or REVISION_RE.fullmatch(revision) is None
         or not isinstance(archive, str)
-        or archive != expected_archive
+        or archive != expected
         or not isinstance(archive_sha256, str)
         or SHA256_RE.fullmatch(archive_sha256) is None
     ):
@@ -155,8 +212,13 @@ def valid_release(release: Any, policy_channel: str) -> dict[str, Any] | None:
         "version": version,
         "channel": policy_channel,
         "revision": revision,
-        "archive": archive,
-        "archive_sha256": archive_sha256,
+        "artifacts": {
+            platform: {
+                "upstream_arch": spec["upstream_arch"],
+                "archive": archive,
+                "archive_sha256": archive_sha256,
+            }
+        },
     }
 
 
@@ -167,6 +229,7 @@ def anomaly(
     upstream: Any,
     message: str,
     fields: list[str] | None = None,
+    platform: str | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "kind": kind,
@@ -175,128 +238,209 @@ def anomaly(
         "old": old,
         "upstream": upstream,
     }
+    if platform is not None:
+        result["platform"] = platform
     if fields:
         result["changed_fields"] = fields
     return result
 
 
 def collect_releases(
-    release_manifest: Any, policy_channel: str
-) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    release_manifest: Any, policy_channel: str, platforms: list[str]
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, list[dict[str, Any]]]]]:
     if not isinstance(release_manifest, dict) or not isinstance(release_manifest.get("releases"), list):
         raise UpdateError("release manifest must be an object with a releases array")
 
-    raw_by_version: dict[str, list[dict[str, Any]]] = {}
+    raw_by_version: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for release in release_manifest["releases"]:
-        if (
-            not isinstance(release, dict)
-            or release.get("channel") != policy_channel
-            or release.get("dart_sdk_arch") != "x64"
-        ):
+        if not isinstance(release, dict) or release.get("channel") != policy_channel:
             continue
         version = release.get("version")
         if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
             continue
-        raw_by_version.setdefault(version, []).append(release)
+        platform = release_platform(release, platforms)
+        if platform is not None:
+            raw_by_version.setdefault(version, {}).setdefault(platform, []).append(release)
 
     candidates: dict[str, dict[str, Any]] = {}
     for version in sorted(raw_by_version, key=version_key):
-        releases = raw_by_version[version]
-        valid_candidates = [
-            candidate
-            for release in releases
-            if (candidate := valid_release(release, policy_channel)) is not None
-        ]
-        if valid_candidates:
-            candidates[version] = sorted(
+        artifacts: dict[str, dict[str, Any]] = {}
+        revisions: list[str] = []
+        for platform in platforms:
+            valid_candidates = [
+                candidate
+                for release in raw_by_version[version].get(platform, [])
+                if (candidate := valid_release(release, policy_channel, platform)) is not None
+            ]
+            if not valid_candidates:
+                break
+            chosen = sorted(
                 valid_candidates,
                 key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
             )[0]
+            artifacts[platform] = chosen["artifacts"][platform]
+            revisions.append(chosen["revision"])
+        if len(artifacts) == len(platforms):
+            candidates[version] = {
+                "version": version,
+                "channel": policy_channel,
+                "revision": sorted(revisions)[0],
+                "artifacts": artifacts,
+            }
 
     return candidates, raw_by_version
+
+
+def release_platform(release: dict[str, Any], platforms: list[str]) -> str | None:
+    for platform in platforms:
+        if release.get("dart_sdk_arch") == PLATFORM_SPECS[platform]["upstream_arch"]:
+            return platform
+    return None
 
 
 def find_trust_anomalies(
     current_entries: list[dict[str, Any]],
     candidates: dict[str, dict[str, Any]],
-    raw_by_version: dict[str, list[dict[str, Any]]],
+    raw_by_version: dict[str, dict[str, list[dict[str, Any]]]],
     minor_lines: int,
+    platforms: list[str],
+    policy_channel: str,
 ) -> list[dict[str, Any]]:
     current_by_version = {entry["version"]: entry for entry in current_entries}
-    selected_versions = {entry["version"] for entry in select_supported(candidates, current_entries, minor_lines)}
+    selected_versions = {
+        entry["version"] for entry in select_supported(candidates, current_entries, minor_lines, platforms)
+    }
     relevant_versions = set(current_by_version) | selected_versions
     anomalies: list[dict[str, Any]] = []
     for version in sorted(relevant_versions, key=version_key):
-        releases = raw_by_version.get(version, [])
-        if len(releases) > 1:
-            upstream_metadata = sorted(
-                (raw_release_metadata(release) for release in releases),
-                key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
-            )
-            anomalies.append(
-                anomaly(
-                    "duplicate_upstream_release",
-                    version,
-                    current_by_version.get(version),
-                    upstream_metadata,
-                    f"official manifest contains {len(releases)} stable entries for {version}",
+        releases_by_platform = raw_by_version.get(version, {})
+        for platform in platforms:
+            releases = releases_by_platform.get(platform, [])
+            if len(releases) > 1:
+                upstream_metadata = sorted(
+                    (raw_release_metadata(release, platform) for release in releases),
+                    key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
                 )
-            )
+                anomalies.append(
+                    anomaly(
+                        "duplicate_upstream_release",
+                        version,
+                        current_by_version.get(version),
+                        upstream_metadata,
+                        f"official manifest contains {len(releases)} {platform} entries for {version}",
+                        platform=platform,
+                    )
+                )
+
+        valid_revisions: dict[str, str] = {}
+        for platform in platforms:
+            releases = releases_by_platform.get(platform, [])
+            if len(releases) == 1:
+                candidate = valid_release(releases[0], policy_channel, platform)
+                if candidate is not None:
+                    valid_revisions[platform] = candidate["revision"]
+        if len(set(valid_revisions.values())) > 1:
+            upstream_metadata = [
+                raw_release_metadata(releases_by_platform[platform][0], platform)
+                for platform in platforms
+                if platform in valid_revisions
+            ]
+            for platform in valid_revisions:
+                anomalies.append(
+                    anomaly(
+                        "upstream_revision_mismatch",
+                        version,
+                        current_by_version.get(version),
+                        upstream_metadata,
+                        f"required platform artifacts for {version} have different Flutter revisions",
+                        ["revision"],
+                        platform=platform,
+                    )
+                )
     for current in current_entries:
         version = current["version"]
-        releases = raw_by_version.get(version, [])
-        if not releases:
-            anomalies.append(
-                anomaly(
-                    "supported_release_disappeared",
-                    version,
-                    current,
-                    None,
-                    f"trusted supported release {version} is absent from the official manifest",
+        for platform in platforms:
+            releases = raw_by_version.get(version, {}).get(platform, [])
+            if not releases:
+                anomalies.append(
+                    anomaly(
+                        "supported_release_disappeared",
+                        version,
+                        current,
+                        None,
+                        f"trusted supported release {version} on {platform} is absent from the official manifest",
+                        platform=platform,
+                    )
                 )
-            )
-            continue
-        if len(releases) > 1:
-            continue
-        candidate = candidates.get(version)
-        upstream = raw_release_metadata(releases[0])
-        if candidate is None:
+                continue
+            if len(releases) > 1:
+                continue
+            release = releases[0]
+            candidate = valid_release(release, policy_channel, platform)
+            upstream = raw_release_metadata(release, platform)
+            current_artifact = current["artifacts"][platform]
+            if candidate is None:
+                changed_fields = [
+                    "revision" if current["revision"] != upstream["revision"] else None,
+                    *(
+                        field
+                        for field in ARTIFACT_FIELDS
+                        if current_artifact[field]
+                        != (upstream["upstream_arch"] if field == "upstream_arch" else upstream[field])
+                    ),
+                ]
+                changed_fields = [field for field in changed_fields if field is not None]
+                anomalies.append(
+                    anomaly(
+                        "trusted_release_metadata_changed" if changed_fields else "supported_release_invalid_metadata",
+                        version,
+                        current,
+                        upstream,
+                        f"official metadata changed for trusted release {version} on {platform}"
+                        if changed_fields
+                        else f"official metadata for trusted release {version} on {platform} no longer passes the release filter",
+                        changed_fields,
+                        platform=platform,
+                    )
+                )
+                continue
             changed_fields = [
-                field for field in ("revision", "archive", "archive_sha256") if current[field] != upstream[field]
+                "revision" if current["revision"] != candidate["revision"] else None,
+                *(
+                    field
+                    for field in ARTIFACT_FIELDS
+                    if current_artifact[field] != candidate["artifacts"][platform][field]
+                ),
             ]
-            anomalies.append(
-                anomaly(
-                    "trusted_release_metadata_changed" if changed_fields else "supported_release_invalid_metadata",
-                    version,
-                    current,
-                    upstream,
-                    f"official metadata changed for trusted release {version}"
-                    if changed_fields
-                    else f"official metadata for trusted release {version} no longer passes the release filter",
-                    changed_fields,
+            changed_fields = [field for field in changed_fields if field is not None]
+            if changed_fields:
+                anomalies.append(
+                    anomaly(
+                        "trusted_release_metadata_changed",
+                        version,
+                        current,
+                        upstream,
+                        f"official metadata changed for trusted release {version} on {platform}",
+                        changed_fields,
+                        platform=platform,
+                    )
                 )
-            )
-            continue
-        changed_fields = [field for field in ("revision", "archive", "archive_sha256") if current[field] != candidate[field]]
-        if changed_fields:
-            anomalies.append(
-                anomaly(
-                    "trusted_release_metadata_changed",
-                    version,
-                    current,
-                    compact_entry(candidate),
-                    f"official metadata changed for trusted release {version}",
-                    changed_fields,
-                )
-            )
-    return sorted(anomalies, key=lambda item: (version_key(item["version"]), item["kind"]))
+    return sorted(
+        anomalies,
+        key=lambda item: (version_key(item["version"]), item.get("platform", ""), item["kind"]),
+    )
 
 
 def select_supported(
-    candidates: dict[str, dict[str, Any]], current_entries: list[dict[str, Any]], minor_lines: int
+    candidates: dict[str, dict[str, Any]],
+    current_entries: list[dict[str, Any]],
+    minor_lines: int,
+    platforms: list[str],
 ) -> list[dict[str, Any]]:
     latest_by_minor: dict[tuple[int, int], dict[str, Any]] = {}
     for candidate in candidates.values():
+        if set(candidate.get("artifacts", {})) != set(platforms):
+            continue
         parsed_version = version_key(candidate["version"])
         minor = parsed_version[:2]
         current = latest_by_minor.get(minor)
@@ -319,12 +463,13 @@ def render_json(value: Any) -> str:
 def render_supported_table(entries: list[dict[str, Any]]) -> str:
     rows = [
         BEGIN_MARKER,
-        "| Flutter | Channel | Git revision | SDK archive SHA256 |",
-        "| --- | --- | --- | --- |",
+        "| Flutter | Platform | Channel | Git revision | SDK archive SHA256 |",
+        "| --- | --- | --- | --- | --- |",
     ]
     rows.extend(
-        f"| {entry['version']} | {entry['channel']} | `{entry['revision']}` | `{entry['archive_sha256']}` |"
+        f"| {entry['version']} | {platform} | {entry['channel']} | `{entry['revision']}` | `{entry['artifacts'][platform]['archive_sha256']}` |"
         for entry in entries
+        for platform in sorted(entry["artifacts"])
     )
     rows.append(END_MARKER)
     return "\n".join(rows)
@@ -365,11 +510,17 @@ def release_changes(old_entries: list[dict[str, Any]], new_entries: list[dict[st
 
 
 def render_metadata(entry: dict[str, Any]) -> list[str]:
-    return [
-        f"  - revision: `{entry['revision']}`",
-        f"  - archive: `{entry['archive']}`",
-        f"  - SHA256: `{entry['archive_sha256']}`",
-    ]
+    lines = [f"  - revision: `{entry['revision']}`"]
+    for platform in sorted(entry["artifacts"]):
+        artifact = entry["artifacts"][platform]
+        lines.extend(
+            [
+                f"  - platform: `{platform}`",
+                f"    archive: `{artifact['archive']}`",
+                f"    SHA256: `{artifact['archive_sha256']}`",
+            ]
+        )
+    return lines
 
 
 def render_json_for_markdown(value: Any) -> str:
@@ -388,7 +539,8 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         ]
         for item in summary["anomalies"]:
             title = item["kind"].replace("_", " ").upper()
-            lines.extend(["", f"### {title}: `{item['version']}`", f"{item['message']}."])
+            platform = f" [{item['platform']}]" if item.get("platform") else ""
+            lines.extend(["", f"### {title}: `{item['version']}`{platform}", f"{item['message']}."])
             if item.get("changed_fields"):
                 lines.append(f"Changed fields: {', '.join(item['changed_fields'])}.")
             lines.extend(
@@ -538,13 +690,15 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
     manifest = load_json(manifest_path, "supported version manifest")
     policy, old_entries, minor_lines = validate_supported_manifest(manifest, manifest_path)
     release_manifest = load_json(releases_path, "release manifest")
-    candidates, raw_by_version = collect_releases(release_manifest, policy["channel"])
-    anomalies = find_trust_anomalies(old_entries, candidates, raw_by_version, minor_lines)
+    candidates, raw_by_version = collect_releases(release_manifest, policy["channel"], policy["platforms"])
+    anomalies = find_trust_anomalies(
+        old_entries, candidates, raw_by_version, minor_lines, policy["platforms"], policy["channel"]
+    )
     if anomalies:
         summary = build_anomaly_summary(policy, anomalies)
         return summary, render_summary_markdown(summary)
 
-    new_entries = select_supported(candidates, old_entries, minor_lines)
+    new_entries = select_supported(candidates, old_entries, minor_lines, policy["platforms"])
     proposed_manifest = {
         "schema": manifest["schema"],
         "support_policy": policy,
