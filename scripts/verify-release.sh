@@ -47,18 +47,22 @@ curl \
   https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
 
 release_count="$(jq -er --arg version "$version" --arg channel "$channel" \
-  '[.releases[]? | select(.version == $version and .channel == $channel)] | length' \
+  '[.releases[]? | select(.version == $version and .channel == $channel and .dart_sdk_arch == "x64")] | length' \
   "$manifest_path")" || fail "malformed release manifest"
 [[ "$release_count" == "1" ]] || fail "expected exactly one matching release, found $release_count"
 
+release_arch="$(jq -er --arg version "$version" --arg channel "$channel" \
+  '.releases[] | select(.version == $version and .channel == $channel and .dart_sdk_arch == "x64") | .dart_sdk_arch' \
+  "$manifest_path")" || fail "release architecture is missing"
+[[ "$release_arch" == "x64" ]] || fail "release is not Linux x64"
 release_archive="$(jq -er --arg version "$version" --arg channel "$channel" \
-  '.releases[] | select(.version == $version and .channel == $channel) | .archive' \
+  '.releases[] | select(.version == $version and .channel == $channel and .dart_sdk_arch == "x64") | .archive' \
   "$manifest_path")" || fail "release archive is missing"
 release_revision="$(jq -er --arg version "$version" --arg channel "$channel" \
-  '.releases[] | select(.version == $version and .channel == $channel) | .hash' \
+  '.releases[] | select(.version == $version and .channel == $channel and .dart_sdk_arch == "x64") | .hash' \
   "$manifest_path")" || fail "release revision is missing"
 release_sha256="$(jq -er --arg version "$version" --arg channel "$channel" \
-  '.releases[] | select(.version == $version and .channel == $channel) | .sha256' \
+  '.releases[] | select(.version == $version and .channel == $channel and .dart_sdk_arch == "x64") | .sha256' \
   "$manifest_path")" || fail "release SHA256 is missing"
 
 expected_archive="$channel/linux/flutter_linux_"$version"-"$channel".tar.xz"

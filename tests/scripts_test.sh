@@ -14,6 +14,29 @@ assert_contains() {
   [[ "$haystack" == *"$needle"* ]] || fail "expected output to contain: $needle"
 }
 
+assert_no_text_match() {
+  local pattern="$1"
+  local haystack="$2"
+  local status
+  if grep -nE "$pattern" <<< "$haystack"; then
+    fail "unexpected match: $pattern"
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] || fail "grep failed while checking: $pattern (status $status)"
+  fi
+}
+
+assert_no_repo_match() {
+  local pattern="$1"
+  local status
+  if grep -RniE --exclude='scripts_test.sh' --exclude-dir='.git' "$pattern" "$ROOT_DIR"; then
+    fail "unexpected repository match: $pattern"
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] || fail "grep failed while checking repository: $pattern (status $status)"
+  fi
+}
+
 assert_fails() {
   if "$@" >/dev/null 2>&1; then
     fail "expected command to fail: $*"
@@ -23,8 +46,12 @@ assert_fails() {
 manifest="$ROOT_DIR/supported_version.json"
 validator="$ROOT_DIR/scripts/validate-supported-versions.sh"
 classifier="$ROOT_DIR/scripts/classify-changes.sh"
+publish_matrix_script="$ROOT_DIR/scripts/publish-matrix.sh"
+
+command -v grep >/dev/null 2>&1 || fail 'required command not found: grep'
 
 "$validator" "$manifest"
+python3 "$ROOT_DIR/tests/test_update_supported_versions.py"
 
 assert_classification() {
   local expected="$1"
@@ -73,6 +100,39 @@ fixture_toolchain_result="$(cd "$fixture_repo" && "$classifier" --revisions \
   "$fixture_base" "$fixture_toolchain_head")"
 [[ "$fixture_toolchain_result" == 'requires_toolchain_ci=true' ]] \
   || fail "expected toolchain revision range to require CI, got: $fixture_toolchain_result"
+
+publish_base="$ROOT_DIR/tests/fixtures/supported_version.json"
+jq '
+  .supported_versions[0] = (.supported_versions[0]
+    | .version = "1.2.4"
+    | .revision = "7777777777777777777777777777777777777777"
+    | .archive = "stable/linux/flutter_linux_1.2.4-stable.tar.xz"
+    | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
+' "$publish_base" > "$test_dir/publish-patch.json"
+patch_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-patch.json")"
+[[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 1 ]] \
+  || fail 'publish matrix did not contain one patch replacement'
+[[ "$(jq -er '.include[0].version' <<< "$patch_matrix")" == '1.2.4' ]] \
+  || fail 'publish matrix omitted the replacement patch'
+
+jq '.supported_versions += [{
+  "version": "2.1.0",
+  "channel": "stable",
+  "revision": "8888888888888888888888888888888888888888",
+  "archive": "stable/linux/flutter_linux_2.1.0-stable.tar.xz",
+  "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+}]' "$publish_base" > "$test_dir/publish-new-minor.json"
+new_minor_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-new-minor.json")"
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 1 ]] \
+  || fail 'publish matrix did not contain one new minor'
+[[ "$(jq -er '.include[0].version' <<< "$new_minor_matrix")" == '2.1.0' ]] \
+  || fail 'publish matrix omitted the new minor'
+
+jq '.supported_versions = .supported_versions[1:]' "$publish_base" > "$test_dir/publish-retire-only.json"
+retire_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-retire-only.json")"
+[[ "$(jq -er '.include | length' <<< "$retire_matrix")" == 0 ]] \
+  || fail 'publish matrix attempted to publish a retired-only change'
+assert_fails "$publish_matrix_script" "$test_dir/missing.json" "$publish_base"
 
 for filter in \
   '.schema = 2' \
@@ -140,23 +200,18 @@ assert_fails "$ROOT_DIR/scripts/verify-release.sh" 3.47.3 stable \
   e8113bf45620cbeb8aff64947ee4c93e16adb4cf \
   988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1 \
   "$ROOT_DIR/not-the-official-archive.tar.xz"
+verify_source="$(sed -n '1,180p' "$ROOT_DIR/scripts/verify-release.sh")"
+assert_contains 'dart_sdk_arch == "x64"' "$verify_source"
 assert_fails "$ROOT_DIR/scripts/smoke-test.sh" image 3.47.3
 
-if rg -n -i 'rst[ -]?platform|consumer application|consumer pub' \
-  "$ROOT_DIR" --glob '!tests/scripts_test.sh' --glob '!.git/**'; then
-  fail 'repository contains a consumer-specific reference'
-fi
+assert_no_repo_match 'rst[ -]?platform|consumer application|consumer pub'
 
 acquire_source="$(sed -n '1,180p' "$ROOT_DIR/scripts/acquire-flutter.sh")"
-if rg -n 'empty Flutter attestation bundle' <<< "$acquire_source"; then
-  fail 'informational attestation download must not be mandatory'
-fi
+assert_no_text_match 'empty Flutter attestation bundle' "$acquire_source"
 assert_contains 'optional Flutter attestation bundle unavailable' "$acquire_source"
 
 publish_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/publish.yml")"
-if rg -n 'awk.*digest:' <<< "$publish_source"; then
-  fail 'publish workflow must not parse docker push output'
-fi
+assert_no_text_match 'awk.*digest:' "$publish_source"
 assert_contains 'docker image inspect' "$publish_source"
 assert_contains '.RepoDigests' "$publish_source"
 assert_contains 'provenance: false' "$(sed -n '1,240p' "$ROOT_DIR/.github/workflows/ci.yml")"
@@ -169,16 +224,37 @@ assert_contains '.pull_request.head.sha' "$ci_source"
 assert_contains 'if: needs.manifest.outputs.requires_toolchain_ci == '\''true'\''' "$ci_source"
 assert_contains 'name: CI gate' "$ci_source"
 assert_contains 'if: always()' "$ci_source"
-if rg -n 'ref:.*pull_request\.head\.sha' <<< "$ci_source"; then
-  fail 'manifest validation must use the merge checkout, not the PR head'
-fi
-if rg -n 'paths-ignore:' <<< "$ci_source"; then
-  fail 'CI must not be skipped at the event level'
-fi
+assert_no_text_match 'ref:.*pull_request\.head\.sha' "$ci_source"
+assert_no_text_match 'paths-ignore:' "$ci_source"
 
 assert_contains 'scripts/classify-changes.sh --revisions' "$publish_source"
 assert_contains '.before' "$publish_source"
 assert_contains '.after' "$publish_source"
-assert_contains 'github.event_name == '\''workflow_dispatch'\''' "$publish_source"
+assert_contains 'GITHUB_EVENT_NAME' "$publish_source"
+assert_contains 'publish_matrix' "$publish_source"
+assert_contains 'publish_needed' "$publish_source"
+assert_contains 'scripts/publish-matrix.sh' "$publish_source"
+assert_contains 'git show "$base_sha:supported_version.json"' "$publish_source"
+assert_contains 'falling back to full publication' "$publish_source"
+
+watcher_source="$(sed -n '1,320p' "$ROOT_DIR/.github/workflows/flutter-release-watch.yml")"
+assert_contains 'cron: "17 3 * * *"' "$watcher_source"
+assert_contains 'automation/flutter-support-update' "$watcher_source"
+assert_contains 'releases_linux.json' "$watcher_source"
+assert_contains 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' "$watcher_source"
+assert_contains 'environment:' "$watcher_source"
+assert_contains 'name: flutter-release-watcher' "$watcher_source"
+assert_contains 'deployment: false' "$watcher_source"
+assert_contains 'client-id: ${{ vars.FLUTTER_WATCHER_CLIENT_ID }}' "$watcher_source"
+assert_contains 'private-key: ${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}' "$watcher_source"
+assert_contains 'steps.app-token.outputs.app-slug' "$watcher_source"
+assert_contains 'gh api "/users/${APP_SLUG}[bot]" --jq .id' "$watcher_source"
+assert_contains 'git config user.name "${APP_SLUG}[bot]"' "$watcher_source"
+assert_contains 'git config user.email "${BOT_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"' "$watcher_source"
+assert_contains 'security_anomaly' "$watcher_source"
+assert_contains 'Configure it for the `main` branch/ref with no required reviewer' "$(< "$ROOT_DIR/README.md")"
+assert_no_text_match 'secrets\.FLUTTER_WATCHER_(APP|CLIENT)_ID|app-id:|peter-evans|create-pull-request|github-actions-create-pr|secrets\.PAT|secrets\.GH_TOKEN' \
+  "$watcher_source"
+assert_no_text_match 'git config user\.name "flutter-release-watcher\[bot\]"' "$watcher_source"
 
 printf 'PASS: script and supply-chain guardrails\n'

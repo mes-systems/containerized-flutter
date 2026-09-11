@@ -1,0 +1,63 @@
+{
+  "releases": [
+    {
+      "version": "2.0.1",
+      "channel": "stable",
+      "dart_sdk_arch": "x64",
+      "hash": "3333333333333333333333333333333333333333",
+      "archive": "stable/linux/flutter_linux_2.0.1-stable.tar.xz",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "release_date": "2025-03-03"
+    },
+    {
+      "version": "2.0.0-rc.1",
+      "channel": "stable",
+      "dart_sdk_arch": "x64",
+      "hash": "4444444444444444444444444444444444444444",
+      "archive": "stable/linux/flutter_linux_2.0.0-rc.1-stable.tar.xz",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    {
+      "version": "1.2.3",
+      "channel": "stable",
+      "dart_sdk_arch": "x64",
+      "hash": "1111111111111111111111111111111111111111",
+      "archive": "stable/linux/flutter_linux_1.2.3-stable.tar.xz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "release_date": "2024-01-01"
+    },
+    {
+      "version": "1.4.2",
+      "channel": "stable",
+      "dart_sdk_arch": "x64",
+      "hash": "2222222222222222222222222222222222222222",
+      "archive": "stable/linux/flutter_linux_1.4.2-stable.tar.xz",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "release_date": "2024-04-02"
+    },
+    {
+      "version": "2.1.0-beta.1",
+      "channel": "beta",
+      "dart_sdk_arch": "x64",
+      "hash": "5555555555555555555555555555555555555555",
+      "archive": "beta/linux/flutter_linux_2.1.0-beta.1-beta.tar.xz",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "version": "not-a-version",
+      "channel": "stable",
+      "dart_sdk_arch": "x64",
+      "hash": "6666666666666666666666666666666666666666",
+      "archive": "stable/linux/flutter_linux_not-a-version-stable.tar.xz",
+      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "version": "1.4.3",
+      "channel": "stable",
+      "dart_sdk_arch": "x64",
+      "hash": "not-a-git-revision",
+      "archive": "stable/linux/flutter_linux_1.4.3-stable.tar.xz",
+      "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+    }
+  ]
+}

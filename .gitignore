@@ -1,2 +1,7 @@
 .artifacts/
 .DS_Store
+
+# Byte-compiled / optimized / DLL Python files
+__pycache__/
+*.py[codz]
+*$py.class

@@ -13,7 +13,7 @@ the Flutter version, stable channel, official archive path, Git revision, and
 archive SHA256.
 
 scripts/verify-release.sh downloads the official
-releases_linux.json, requires exactly one matching release, checks that all
+releases_linux.json, requires exactly one matching stable Linux x64 release, checks that all
 of its release metadata matches the pinned entry, and independently hashes the
 already acquired archive. The Dockerfile checks that same digest again before
 extracting the SDK, then verifies the extracted Git revision and Flutter tag.
@@ -37,23 +37,26 @@ exact OCI digest.
 ## Supported releases
 
 Containerized Flutter actively maintains the latest patch release of up to four
-recent stable Flutter minor release lines. The policy is encoded in
+active stable Flutter minor release lines. The policy is encoded in
 `supported_version.json` as `minor_lines: 4` and
 `selection: latest_patch_per_minor`.
 
 A new patch release for an existing minor line replaces its current entry. A
-new stable minor line adds its newest release; once four lines are supported,
+new stable minor line newer than the active window adds its newest release;
+historical lines never backfill unused capacity. Once four lines are supported,
 the oldest line is retired. Superseded or retired releases are removed from
 the active support manifest and are no longer rebuilt when the base image or
 packaging changes. Previously published image tags and OCI digests remain
 available in GHCR, but there is no ongoing rebuild/support guarantee for those
 releases.
 
+<!-- BEGIN GENERATED SUPPORTED FLUTTER RELEASES -->
 | Flutter | Channel | Git revision | SDK archive SHA256 |
 | --- | --- | --- | --- |
 | 3.41.9 | stable | `00b0c91f06209d9e4a41f71b7a512d6eb3b9c694` | `cf2631dde02570733921a530f47a96abe896b5e334682d2743c29530ea88bb2e` |
 | 3.44.9 | stable | `6b182d2c7585eba26d4edce0f97630effd256c33` | `a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb` |
 | 3.47.3 | stable | `e8113bf45620cbeb8aff64947ee4c93e16adb4cf` | `988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1` |
+<!-- END GENERATED SUPPORTED FLUTTER RELEASES -->
 
 The initial image target is Linux amd64 only.
 
@@ -139,22 +142,40 @@ files into the repository checkout.
 
 ## Adding a Flutter release
 
-Add or replace one entry in `supported_version.json` with the latest patch for
-an actively supported stable minor line. Include the official release version,
-stable channel, 40-character Git revision, official archive path, and
-64-character SHA256. Obtain the revision, archive path, and SHA256 from the
-official Flutter release infrastructure; do not guess or copy a digest from an
-unverified file. Run:
+The daily watcher normally discovers and proposes these changes itself. If it
+reports a security anomaly, a maintainer must compare the trusted and upstream
+metadata before intentionally changing the trust root. Any intentional update
+must use the official release version, stable channel, 40-character Git
+revision, official archive path, and 64-character SHA256; do not guess or copy
+a digest from an unverified file. Run:
 
 ```
 scripts/validate-supported-versions.sh supported_version.json
 ```
 
 The manifest is intentionally limited to the active support window rather
-than expanded into a historical release list. The same release-manifest and
-local archive checks run in CI and before publication. Flutter upgrades are
-intentionally curated rather than automated by Dependabot because each new
-release adds a new upstream release contract.
+than expanded into a historical release list. A daily watcher discovers valid
+stable Linux x64 releases from the official release manifest and proposes
+manifest and README updates in one pull request. Acceptance remains
+maintainer-reviewed through that PR; the watcher never silently changes the
+trust-root metadata for an already supported exact release. The same
+release-manifest and local archive checks run in CI and before publication.
+
+## Watcher setup
+
+The watcher requires a repository Environment named `flutter-release-watcher`.
+Configure it for the `main` branch/ref with no required reviewer; the workflow
+sets `deployment: false` because it is not a deployment workflow. Add only:
+
+- Environment variable: `FLUTTER_WATCHER_CLIENT_ID`
+- Environment secret: `FLUTTER_WATCHER_PRIVATE_KEY`
+
+Install the dedicated least-privilege GitHub App with Metadata read, Contents
+read/write, Pull requests read/write, and Issues read/write permissions. Do not
+use repository-level equivalents or a PAT. The watcher discovers releases,
+resets its stable automation branch from current `main`, and proposes a PR; it
+does not modify `main` or merge automatically. Ordinary PR CI remains the
+acceptance gate.
 
 Dependabot checks the pinned Ubuntu 24.04 Docker digest weekly. When Ubuntu
 changes, its short digest changes the public image tags, while previous tags
@@ -168,4 +189,8 @@ but do not rebuild the supported Flutter matrix. The shared change classifier
 allows this only when every changed path is explicitly harmless; any unknown or
 toolchain-relevant path defaults to full validation. Manual workflow dispatch
 can force the full matrix, and a main-branch publication follows the same
-classification before pushing or attesting images.
+classification before pushing or attesting images. A manifest-only publication
+builds newly added or replacement Flutter versions only; Dockerfile, base-image,
+or packaging changes rebuild the full active matrix. Retired GHCR artifacts are
+not deleted. Watcher PRs still pass through this ordinary full-matrix CI gate;
+the watcher does not bypass release verification or image tests.
