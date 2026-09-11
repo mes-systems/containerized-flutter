@@ -194,6 +194,63 @@ dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_plan")"
 [[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 3 ]] \
   || fail 'workflow_dispatch did not plan every supported release'
 
+legacy_manifest="$test_dir/legacy-supported-version.json"
+jq '
+  .schema = 1
+  | del(.support_policy.platforms)
+  | .supported_versions |= map(
+      . as $entry
+      | {
+          version: $entry.version,
+          channel: $entry.channel,
+          revision: $entry.revision,
+          archive: $entry.artifacts["linux/amd64"].archive,
+          archive_sha256: $entry.artifacts["linux/amd64"].archive_sha256
+        }
+    )
+' "$publish_base" > "$legacy_manifest"
+
+migration_repo="$test_dir/schema-migration-repo"
+git init -q "$migration_repo"
+git -C "$migration_repo" config user.name schema-migration-test
+git -C "$migration_repo" config user.email schema-migration-test@example.invalid
+cp "$legacy_manifest" "$migration_repo/supported_version.json"
+printf 'README\n' > "$migration_repo/README.md"
+git -C "$migration_repo" add supported_version.json README.md
+git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: legacy schema 1 manifest'
+migration_base="$(git -C "$migration_repo" rev-parse HEAD)"
+cp "$publish_base" "$migration_repo/supported_version.json"
+git -C "$migration_repo" add supported_version.json
+git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: migrate to schema 2'
+migration_head="$(git -C "$migration_repo" rev-parse HEAD)"
+migration_plan="$(cd "$migration_repo" && "$publication_classifier" --revisions \
+  "$migration_base" "$migration_head" supported_version.json)"
+assert_contains 'publish_mode=selective' "$migration_plan"
+assert_contains 'publish_needed=false' "$migration_plan"
+migration_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$migration_plan")"
+[[ "$(jq -er '.include | length' <<< "$migration_matrix")" == 0 ]] \
+  || fail 'schema migration attempted to republish unchanged artifacts'
+
+jq '
+  .supported_versions[0] = (.supported_versions[0]
+    | .version = "1.2.4"
+    | .revision = "7777777777777777777777777777777777777777"
+    | .artifacts["linux/amd64"].archive = "stable/linux/flutter_linux_1.2.4-stable.tar.xz"
+    | .artifacts["linux/amd64"].archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
+' "$publish_base" > "$test_dir/migration-patch.json"
+cp "$test_dir/migration-patch.json" "$migration_repo/supported_version.json"
+git -C "$migration_repo" add supported_version.json
+git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: migrate and update artifact'
+migration_patch_head="$(git -C "$migration_repo" rev-parse HEAD)"
+migration_patch_plan="$(cd "$migration_repo" && "$publication_classifier" --revisions \
+  "$migration_base" "$migration_patch_head" supported_version.json)"
+assert_contains 'publish_needed=true' "$migration_patch_plan"
+migration_patch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$migration_patch_plan")"
+[[ "$(jq -er '.include | length' <<< "$migration_patch_matrix")" == 1 ]] \
+  || fail 'schema migration plus patch did not contain one artifact'
+[[ "$(jq -er '.include[0].version' <<< "$migration_patch_matrix")" == '1.2.4' ]] \
+  || fail 'schema migration plus patch selected the wrong artifact'
+
 publication_repo="$test_dir/publication-repo"
 git init -q "$publication_repo"
 git -C "$publication_repo" config user.name publication-test
@@ -207,8 +264,8 @@ jq '
   .supported_versions[0] = (.supported_versions[0]
     | .version = "1.2.4"
     | .revision = "7777777777777777777777777777777777777777"
-    | .archive = "stable/linux/flutter_linux_1.2.4-stable.tar.xz"
-    | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
+    | .artifacts["linux/amd64"].archive = "stable/linux/flutter_linux_1.2.4-stable.tar.xz"
+    | .artifacts["linux/amd64"].archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
 ' "$publication_repo/supported_version.json" > "$test_dir/publication-manifest.json"
 mv "$test_dir/publication-manifest.json" "$publication_repo/supported_version.json"
 git -C "$publication_repo" add supported_version.json
@@ -242,8 +299,13 @@ jq '.supported_versions += [{
   "version": "2.1.0",
   "channel": "stable",
   "revision": "8888888888888888888888888888888888888888",
-  "archive": "stable/linux/flutter_linux_2.1.0-stable.tar.xz",
-  "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  "artifacts": {
+    "linux/amd64": {
+      "upstream_arch": "x64",
+      "archive": "stable/linux/flutter_linux_2.1.0-stable.tar.xz",
+      "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  }
 }]' "$publication_repo/supported_version.json" > "$test_dir/new-minor-manifest.json"
 mv "$test_dir/new-minor-manifest.json" "$publication_repo/supported_version.json"
 git -C "$publication_repo" add supported_version.json
@@ -294,8 +356,8 @@ jq '
   .supported_versions[0] = (.supported_versions[0]
     | .version = "1.2.4"
     | .revision = "7777777777777777777777777777777777777777"
-    | .archive = "stable/linux/flutter_linux_1.2.4-stable.tar.xz"
-    | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
+    | .artifacts["linux/amd64"].archive = "stable/linux/flutter_linux_1.2.4-stable.tar.xz"
+    | .artifacts["linux/amd64"].archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
 ' "$publish_base" > "$test_dir/publish-patch.json"
 patch_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-patch.json")"
 [[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 1 ]] \
@@ -307,14 +369,23 @@ jq '.supported_versions += [{
   "version": "2.1.0",
   "channel": "stable",
   "revision": "8888888888888888888888888888888888888888",
-  "archive": "stable/linux/flutter_linux_2.1.0-stable.tar.xz",
-  "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  "artifacts": {
+    "linux/amd64": {
+      "upstream_arch": "x64",
+      "archive": "stable/linux/flutter_linux_2.1.0-stable.tar.xz",
+      "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  }
 }]' "$publish_base" > "$test_dir/publish-new-minor.json"
 new_minor_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-new-minor.json")"
 [[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 1 ]] \
   || fail 'publish matrix did not contain one new minor'
 [[ "$(jq -er '.include[0].version' <<< "$new_minor_matrix")" == '2.1.0' ]] \
   || fail 'publish matrix omitted the new minor'
+
+unchanged_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base")"
+[[ "$(jq -er '.include | length' <<< "$unchanged_matrix")" == 0 ]] \
+  || fail 'unchanged schema 2 manifests attempted publication'
 
 jq '.supported_versions = .supported_versions[1:]' "$publish_base" > "$test_dir/publish-retire-only.json"
 retire_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-retire-only.json")"
@@ -323,14 +394,24 @@ retire_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-ret
 assert_fails "$publish_matrix_script" "$test_dir/missing.json" "$publish_base"
 
 for filter in \
-  '.schema = 2' \
+  '.schema = 1' \
   '.support_policy.selection = "all_releases"' \
+  'del(.support_policy.platforms)' \
+  '.support_policy.platforms = []' \
+  '.support_policy.platforms = ["linux/amd64", "linux/amd64"]' \
+  '.support_policy.platforms = ["linux/arm64"]' \
   '.supported_versions = []' \
   '.support_policy.minor_lines = 1' \
   '.supported_versions[1].version = .supported_versions[0].version' \
   '.supported_versions[0].version = ""' \
   '.supported_versions[0].channel = "beta"' \
-  '.supported_versions[0].revision = "not-a-revision"'
+  '.supported_versions[0].revision = "not-a-revision"' \
+  '.supported_versions[0].artifacts = {}' \
+  '.supported_versions[0].artifacts["linux/arm64"] = .supported_versions[0].artifacts["linux/amd64"]' \
+  '.supported_versions[0].artifacts["linux/amd64"].extra = "shadow"' \
+  '.supported_versions[0].artifacts["linux/amd64"].upstream_arch = "arm64"' \
+  '.supported_versions[0].artifacts["linux/amd64"].archive = "stable/linux/flutter_linux_3.41.9-renamed.tar.xz"' \
+  '.supported_versions[0].artifacts["linux/amd64"].archive_sha256 = "not-a-sha"'
 do
   jq "$filter" "$manifest" > "$test_dir/invalid.json"
   assert_fails "$validator" "$test_dir/invalid.json"
@@ -347,13 +428,13 @@ jq --arg new_version "$mutated_version" '
       .supported_versions[1] = (
         .supported_versions[1]
         | .version = $new_version
-        | .archive = (.channel + "/linux/flutter_linux_" + $new_version + "-" + .channel + ".tar.xz")
+        | .artifacts["linux/amd64"].archive = (.channel + "/linux/flutter_linux_" + $new_version + "-" + .channel + ".tar.xz")
       )
     else
       .supported_versions += [
         ($base
          | .version = $new_version
-         | .archive = (.channel + "/linux/flutter_linux_" + $new_version + "-" + .channel + ".tar.xz"))
+         | .artifacts["linux/amd64"].archive = (.channel + "/linux/flutter_linux_" + $new_version + "-" + .channel + ".tar.xz"))
       ]
     end
 ' "$manifest" > "$test_dir/duplicate-minor.json"
@@ -399,13 +480,17 @@ printf '%s\n' \
   > "$test_dir/missing-sdk-copy.Dockerfile"
 assert_fails "$dockerfile_guard" "$test_dir/missing-sdk-copy.Dockerfile"
 
-assert_fails "$ROOT_DIR/scripts/acquire-flutter.sh" 3.47.3 beta "$ROOT_DIR/.artifacts"
-assert_fails "$ROOT_DIR/scripts/verify-release.sh" 3.47.3 stable \
+assert_fails "$ROOT_DIR/scripts/acquire-flutter.sh" \
+  https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.47.3-stable.tar.xz \
+  "$ROOT_DIR/.artifacts"
+assert_fails "$ROOT_DIR/scripts/verify-release.sh" linux/amd64 3.47.3 stable \
   e8113bf45620cbeb8aff64947ee4c93e16adb4cf \
+  stable/linux/flutter_linux_3.47.3-stable.tar.xz \
   988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1 \
   "$ROOT_DIR/not-the-official-archive.tar.xz"
 verify_source="$(sed -n '1,180p' "$ROOT_DIR/scripts/verify-release.sh")"
-assert_contains 'dart_sdk_arch == "x64"' "$verify_source"
+assert_contains 'upstream_arch="x64"' "$verify_source"
+assert_no_text_match 'dart_sdk_arch.*x64' "$verify_source"
 assert_fails "$ROOT_DIR/scripts/smoke-test.sh" image 3.47.3
 
 assert_no_repo_match 'rst[ -]?platform|consumer application|consumer pub'
@@ -431,6 +516,8 @@ assert_contains 'Remove tested image' "$(sed -n '1,240p' "$ROOT_DIR/.github/work
 assert_contains 'Remove tested image' "$publish_source"
 assert_contains 'test image leaked after cleanup' "$publish_cleanup_source"
 assert_no_text_match '\|\| true' "$publish_cleanup_source"
+assert_contains 'platforms: ${{ matrix.platform }}' "$publish_source"
+assert_no_text_match 'platforms:[[:space:]]+linux/amd64' "$publish_source"
 
 ci_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/ci.yml")"
 ci_cleanup_source="$(sed -n '/^      - name: Remove tested image/,/^  ci-gate:/p' <<< "$ci_source")"
@@ -442,6 +529,10 @@ assert_contains 'name: CI gate' "$ci_source"
 assert_contains 'if: always()' "$ci_source"
 assert_contains 'test image leaked after cleanup' "$ci_cleanup_source"
 assert_no_text_match '\|\| true' "$ci_cleanup_source"
+assert_contains 'scripts/acquire-flutter.sh "${{ matrix.archive }}" .artifacts' "$ci_source"
+assert_contains 'platforms: ${{ matrix.platform }}' "$ci_source"
+assert_contains 'platform_slug' "$ci_source"
+assert_no_text_match 'platforms:[[:space:]]+linux/amd64' "$ci_source"
 assert_no_text_match 'ref:.*pull_request\.head\.sha' "$ci_source"
 assert_no_text_match 'paths-ignore:' "$ci_source"
 

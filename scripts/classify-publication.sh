@@ -118,7 +118,22 @@ plan() {
 
   "$SCRIPT_DIR/validate-supported-versions.sh" "$manifest" >/dev/null \
     || fail "current manifest is invalid: $manifest"
-  if ! matrix="$(jq -c '{include: [.supported_versions[] | {version, channel, revision, archive, archive_sha256}]}' "$manifest")"; then
+  if ! matrix="$(jq -c '
+    {include: [
+      .supported_versions[] as $entry
+      | $entry.artifacts | to_entries[] as $artifact
+      | {
+          version: $entry.version,
+          platform: $artifact.key,
+          channel: $entry.channel,
+          revision: $entry.revision,
+          upstream_arch: $artifact.value.upstream_arch,
+          archive: $artifact.value.archive,
+          archive_sha256: $artifact.value.archive_sha256,
+          platform_slug: ($artifact.key | gsub("/"; "-"))
+        }
+    ]}
+  ' "$manifest")"; then
     fail "could not build the current publication matrix"
   fi
   if ! jq -e '.include | type == "array"' <<< "$matrix" >/dev/null; then
@@ -140,8 +155,6 @@ plan() {
       if ! git show "$base_sha:supported_version.json" > "$old_manifest"; then
         fail "could not read previous supported version manifest at $base_sha"
       fi
-      "$SCRIPT_DIR/validate-supported-versions.sh" "$old_manifest" >/dev/null \
-        || fail 'previous supported version manifest is invalid'
       if ! publish_matrix="$("$SCRIPT_DIR/publish-matrix.sh" "$old_manifest" "$manifest")"; then
         fail 'could not build the selective publication matrix'
       fi

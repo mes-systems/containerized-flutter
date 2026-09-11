@@ -1,31 +1,49 @@
 {
-  "schema": 1,
+  "schema": 2,
   "support_policy": {
     "channel": "stable",
     "minor_lines": 4,
-    "selection": "latest_patch_per_minor"
+    "selection": "latest_patch_per_minor",
+    "platforms": [
+      "linux/amd64"
+    ]
   },
   "supported_versions": [
     {
       "version": "1.2.3",
       "channel": "stable",
       "revision": "1111111111111111111111111111111111111111",
-      "archive": "stable/linux/flutter_linux_1.2.3-stable.tar.xz",
-      "archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "artifacts": {
+        "linux/amd64": {
+          "upstream_arch": "x64",
+          "archive": "stable/linux/flutter_linux_1.2.3-stable.tar.xz",
+          "archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
     },
     {
       "version": "1.4.2",
       "channel": "stable",
       "revision": "2222222222222222222222222222222222222222",
-      "archive": "stable/linux/flutter_linux_1.4.2-stable.tar.xz",
-      "archive_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      "artifacts": {
+        "linux/amd64": {
+          "upstream_arch": "x64",
+          "archive": "stable/linux/flutter_linux_1.4.2-stable.tar.xz",
+          "archive_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
     },
     {
       "version": "2.0.1",
       "channel": "stable",
       "revision": "3333333333333333333333333333333333333333",
-      "archive": "stable/linux/flutter_linux_2.0.1-stable.tar.xz",
-      "archive_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      "artifacts": {
+        "linux/amd64": {
+          "upstream_arch": "x64",
+          "archive": "stable/linux/flutter_linux_2.0.1-stable.tar.xz",
+          "archive_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      }
     }
   ]
 }

@@ -53,7 +53,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          matrix="$(jq -c '{include: [.supported_versions[] | {version, channel, revision, archive, archive_sha256}]}' supported_version.json)"
+          matrix="$(jq -c '
+            {include: [
+              .supported_versions[] as $entry
+              | $entry.artifacts | to_entries[] as $artifact
+              | {
+                  version: $entry.version,
+                  platform: $artifact.key,
+                  channel: $entry.channel,
+                  revision: $entry.revision,
+                  upstream_arch: $artifact.value.upstream_arch,
+                  archive: $artifact.value.archive,
+                  archive_sha256: $artifact.value.archive_sha256,
+                  platform_slug: ($artifact.key | gsub("/"; "-"))
+                }
+            ]}
+          ' supported_version.json)"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   build:
@@ -72,16 +87,18 @@ jobs:
       - name: Acquire Flutter release
         run: |
           set -euo pipefail
-          scripts/acquire-flutter.sh "${{ matrix.version }}" "${{ matrix.channel }}" .artifacts
+          scripts/acquire-flutter.sh "${{ matrix.archive }}" .artifacts
 
       - name: Verify Flutter release
         id: verify
         run: |
           set -euo pipefail
           scripts/verify-release.sh \
+            "${{ matrix.platform }}" \
             "${{ matrix.version }}" \
             "${{ matrix.channel }}" \
             "${{ matrix.revision }}" \
+            "${{ matrix.archive }}" \
             "${{ matrix.archive_sha256 }}" \
             .artifacts/flutter-sdk.tar.xz
 
@@ -97,13 +114,13 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           load: true
           push: false
           provenance: false
           tags: ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }}
-          cache-from: type=gha,scope=flutter-${{ matrix.version }}
-          cache-to: type=gha,mode=max,scope=flutter-${{ matrix.version }}
+          cache-from: type=gha,scope=flutter-${{ matrix.version }}-${{ matrix.platform_slug }}
+          cache-to: type=gha,mode=max,scope=flutter-${{ matrix.version }}-${{ matrix.platform_slug }}
           build-args: |
             FLUTTER_VERSION=${{ matrix.version }}
             FLUTTER_CHANNEL=${{ matrix.channel }}

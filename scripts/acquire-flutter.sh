@@ -1,27 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (( $# != 3 )); then
-  printf 'usage: %s VERSION CHANNEL OUTPUT_DIRECTORY\n' "$0" >&2
+if (( $# != 2 )); then
+  printf 'usage: %s TRUSTED_ARCHIVE_PATH OUTPUT_DIRECTORY\n' "$0" >&2
   exit 2
 fi
 
-version="$1"
-channel="$2"
-output_dir="$3"
+archive_path="$1"
+output_dir="$2"
 
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-  || { printf 'invalid Flutter version: %s\n' "$version" >&2; exit 1; }
-[[ "$channel" == "stable" ]] \
-  || { printf 'unsupported Flutter channel: %s\n' "$channel" >&2; exit 1; }
+[[ "$archive_path" =~ ^stable/linux/flutter_linux_[0-9]+\.[0-9]+\.[0-9]+-stable\.tar\.xz$ ]] \
+  || { printf 'invalid trusted Flutter archive path: %s\n' "$archive_path" >&2; exit 1; }
 [[ -n "$output_dir" ]] \
   || { printf 'output directory must not be empty\n' >&2; exit 1; }
 
 mkdir -p "$output_dir"
 [[ -d "$output_dir" ]] || { printf 'not a directory: %s\n' "$output_dir" >&2; exit 1; }
 
-archive_name="flutter_linux_"$version"-"$channel".tar.xz"
-archive_url="https://storage.googleapis.com/flutter_infra_release/releases/"$channel"/linux/"$archive_name
+archive_url="https://storage.googleapis.com/flutter_infra_release/releases/$archive_path"
 staging_dir="$(mktemp -d "$output_dir/.flutter-acquire.XXXXXX")"
 trap 'rm -rf -- "$staging_dir"' EXIT
 
@@ -57,4 +53,4 @@ else
   rm -f -- "$output_dir/flutter-sdk.tar.xz.intoto.jsonl"
 fi
 printf 'acquired %s in %s (attestation bundle is optional diagnostics)\n' \
-  "$archive_name" "$output_dir"
+  "$archive_path" "$output_dir"
