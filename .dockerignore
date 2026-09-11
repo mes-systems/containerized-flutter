@@ -1,0 +1,4 @@
+*
+!Dockerfile
+!.artifacts/
+!.artifacts/flutter-sdk.tar.xz
