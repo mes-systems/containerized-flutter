@@ -1,5 +1,12 @@
 # Containerized Flutter
 
+<p>
+  <img src="https://img.shields.io/badge/Flutter-02569B?style=for-the-badge&logo=flutter&logoColor=white" alt="Flutter">
+  <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/Linux%20amd64-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux amd64">
+  <img src="https://img.shields.io/badge/GHCR-181717?style=for-the-badge&logo=github&logoColor=white" alt="GHCR">
+</p>
+
 This repository builds a reusable Linux amd64 Flutter SDK/toolchain image. It
 acquires official Flutter release archives before the Docker build, checks the
 release metadata and archive digest, and publishes versioned images to GHCR.
