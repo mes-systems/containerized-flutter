@@ -49,8 +49,8 @@ jq -e '.bases | type == "array" and length > 0' \
   "$manifest" >/dev/null || fail 'bases must be a non-empty array'
 
 base_count="$(jq -er '.bases | length' "$manifest")" || fail 'bases length is unavailable'
-if [[ "$allow_multiple" != true && "$base_count" != 2 ]]; then
-  fail 'production manifest must contain exactly two base records'
+if [[ "$allow_multiple" != true && "$base_count" != 3 ]]; then
+  fail 'production manifest must contain exactly three base records'
 fi
 
 while IFS= read -r base; do
@@ -95,8 +95,8 @@ duplicates="$(jq -r '.bases[].id' "$manifest" | sort | uniq -d)"
 
 if [[ "$allow_multiple" != true ]]; then
   [[ "$(jq -r '.bases | map(.id) | join(" ")' "$manifest")" == \
-    'ubuntu24.04 debian13' ]] \
-    || fail 'production bases must be ordered ubuntu24.04, debian13'
+    'ubuntu24.04 debian13 debian13-slim' ]] \
+    || fail 'production bases must be ordered ubuntu24.04, debian13, debian13-slim'
 
   ubuntu="$(jq -c '.bases[0]' "$manifest")"
   [[ "$(jq -r '.family' <<< "$ubuntu")" == ubuntu \
@@ -111,6 +111,13 @@ if [[ "$allow_multiple" != true ]]; then
     && "$(jq -r '.variant' <<< "$debian")" == default \
     && "$(jq -r '.reference' <<< "$debian")" == 'debian:13@sha256:'* ]] \
     || fail 'production debian13 base record is invalid'
+
+  debian_slim="$(jq -c '.bases[2]' "$manifest")"
+  [[ "$(jq -r '.family' <<< "$debian_slim")" == debian \
+    && "$(jq -r '.version' <<< "$debian_slim")" == 13 \
+    && "$(jq -r '.variant' <<< "$debian_slim")" == slim \
+    && "$(jq -r '.reference' <<< "$debian_slim")" == 'debian:13-slim@sha256:'* ]] \
+    || fail 'production debian13-slim base record is invalid'
 fi
 
 printf 'valid: %s\n' "$manifest"
