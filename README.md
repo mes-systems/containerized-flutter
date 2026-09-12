@@ -42,12 +42,15 @@ the manifest is the only base-image trust source. The Dockerfile does not
 choose a distribution or provide a fallback: both stages consume the validated
 `BASE_IMAGE` supplied by CI or publication.
 
-The current support list contains Ubuntu 24.04, Debian 13, and Debian 13 Slim.
+The current support list contains Ubuntu 24.04, Ubuntu 26.04, Debian 13, and
+Debian 13 Slim. The Ubuntu bases are supported in parallel as separate
+immutable release lines.
 
 <!-- BEGIN GENERATED SUPPORTED BASES -->
 | Base ID | Family | Version | Variant | Digest |
 | --- | --- | --- | --- | --- |
 | `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:224a1869083a...` |
+| `ubuntu26.04` | ubuntu | 26.04 | default | `sha256:513c074113a8...` |
 | `debian13` | debian | 13 | default | `sha256:f324c7ff5432...` |
 | `debian13-slim` | debian | 13 | slim | `sha256:d7e12182ce18...` |
 <!-- END GENERATED SUPPORTED BASES -->
