@@ -49,8 +49,8 @@ jq -e '.bases | type == "array" and length > 0' \
   "$manifest" >/dev/null || fail 'bases must be a non-empty array'
 
 base_count="$(jq -er '.bases | length' "$manifest")" || fail 'bases length is unavailable'
-if [[ "$allow_multiple" != true && "$base_count" != 3 ]]; then
-  fail 'production manifest must contain exactly three base records'
+if [[ "$allow_multiple" != true && "$base_count" != 4 ]]; then
+  fail 'production manifest must contain exactly four base records'
 fi
 
 while IFS= read -r base; do
@@ -95,8 +95,8 @@ duplicates="$(jq -r '.bases[].id' "$manifest" | sort | uniq -d)"
 
 if [[ "$allow_multiple" != true ]]; then
   [[ "$(jq -r '.bases | map(.id) | join(" ")' "$manifest")" == \
-    'ubuntu24.04 debian13 debian13-slim' ]] \
-    || fail 'production bases must be ordered ubuntu24.04, debian13, debian13-slim'
+    'ubuntu24.04 ubuntu26.04 debian13 debian13-slim' ]] \
+    || fail 'production bases must be ordered ubuntu24.04, ubuntu26.04, debian13, debian13-slim'
 
   ubuntu="$(jq -c '.bases[0]' "$manifest")"
   [[ "$(jq -r '.family' <<< "$ubuntu")" == ubuntu \
@@ -105,14 +105,21 @@ if [[ "$allow_multiple" != true ]]; then
     && "$(jq -r '.reference' <<< "$ubuntu")" == 'ubuntu:24.04@sha256:'* ]] \
     || fail 'production ubuntu24.04 base record is invalid'
 
-  debian="$(jq -c '.bases[1]' "$manifest")"
+  ubuntu26="$(jq -c '.bases[1]' "$manifest")"
+  [[ "$(jq -r '.family' <<< "$ubuntu26")" == ubuntu \
+    && "$(jq -r '.version' <<< "$ubuntu26")" == 26.04 \
+    && "$(jq -r '.variant' <<< "$ubuntu26")" == default \
+    && "$(jq -r '.reference' <<< "$ubuntu26")" == 'ubuntu:26.04@sha256:'* ]] \
+    || fail 'production ubuntu26.04 base record is invalid'
+
+  debian="$(jq -c '.bases[2]' "$manifest")"
   [[ "$(jq -r '.family' <<< "$debian")" == debian \
     && "$(jq -r '.version' <<< "$debian")" == 13 \
     && "$(jq -r '.variant' <<< "$debian")" == default \
     && "$(jq -r '.reference' <<< "$debian")" == 'debian:13@sha256:'* ]] \
     || fail 'production debian13 base record is invalid'
 
-  debian_slim="$(jq -c '.bases[2]' "$manifest")"
+  debian_slim="$(jq -c '.bases[3]' "$manifest")"
   [[ "$(jq -r '.family' <<< "$debian_slim")" == debian \
     && "$(jq -r '.version' <<< "$debian_slim")" == 13 \
     && "$(jq -r '.variant' <<< "$debian_slim")" == slim \

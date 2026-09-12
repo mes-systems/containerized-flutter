@@ -61,17 +61,20 @@ python3 "$ROOT_DIR/tests/test_update_supported_versions.py"
 python3 "$ROOT_DIR/tests/test_update_supported_bases.py"
 "$dockerfile_guard" "$ROOT_DIR/Dockerfile"
 current_matrix="$("$build_matrix_script" "$manifest" "$base_manifest")"
-[[ "$(jq -er '.include | length' <<< "$current_matrix")" == 9 ]] \
-  || fail 'current build matrix must contain nine Flutter/base rows'
+[[ "$(jq -er '.include | length' <<< "$current_matrix")" == 12 ]] \
+  || fail 'current build matrix must contain twelve Flutter/base rows'
 jq -e '
   [.include[] | [.version, .base_id]]
   == [["3.41.9", "ubuntu24.04"],
+      ["3.41.9", "ubuntu26.04"],
       ["3.41.9", "debian13"],
       ["3.41.9", "debian13-slim"],
       ["3.44.9", "ubuntu24.04"],
+      ["3.44.9", "ubuntu26.04"],
       ["3.44.9", "debian13"],
       ["3.44.9", "debian13-slim"],
       ["3.47.3", "ubuntu24.04"],
+      ["3.47.3", "ubuntu26.04"],
       ["3.47.3", "debian13"],
       ["3.47.3", "debian13-slim"]]
 ' <<< "$current_matrix" >/dev/null \
@@ -162,7 +165,7 @@ assert_publication_mode full \
 dispatch_mode="$("$publication_classifier" --workflow-dispatch "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$dispatch_mode"
 dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_mode")"
-[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 9 ]] \
+[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 12 ]] \
   || fail 'workflow_dispatch did not plan every supported Flutter/base row'
 assert_fails "$publication_classifier" --revisions not-a-base not-a-head
 
@@ -174,90 +177,115 @@ for filter in \
   '.schema = 2' \
   'del(.bases)' \
   '.bases = []' \
-  '.bases[0] += {extra: "not-allowed"}' \
-  '.bases[0].id = ""' \
-  '.bases[0].id = "Ubuntu24.04"' \
-  'del(.bases[0].family)' \
-  '.bases[0].family = ""' \
-  'del(.bases[0].version)' \
-  '.bases[0].version = ""' \
-  'del(.bases[0].variant)' \
-  '.bases[0].variant = ""' \
-  'del(.bases[0].reference)' \
-  '.bases[0].reference = ""' \
-  '.bases[0].reference = "ubuntu:24.04"' \
-  '.bases[0].reference = "ubuntu:24.04@sha256:aaaaaaaa"' \
-  '.bases[0].reference = "ubuntu:24.04@sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"' \
-  '.bases[0].reference = "https://example.invalid/ubuntu:24.04@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
-  '.bases[0].reference = "debian:trixie@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
-  '.bases[0].family = "debian"' \
-  '.bases += [.bases[0]]'
+  '.bases |= map(if .id == "ubuntu24.04" then . += {extra: "not-allowed"} else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .id = "" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .id = "Ubuntu24.04" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then del(.family) else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .family = "" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then del(.version) else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .version = "" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then del(.variant) else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .variant = "" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then del(.reference) else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .reference = "" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .reference = "ubuntu:24.04" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .reference = "ubuntu:24.04@sha256:aaaaaaaa" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .reference = "ubuntu:24.04@sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .reference = "https://example.invalid/ubuntu:24.04@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .reference = "debian:trixie@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" else . end)' \
+  '.bases |= map(if .id == "ubuntu24.04" then .family = "debian" else . end)' \
+  '.bases += [.bases[] | select(.id == "ubuntu24.04")]'
 do
   jq "$filter" "$base_manifest" > "$test_dir/invalid-bases.json"
   assert_fails "$base_validator" "$test_dir/invalid-bases.json"
 done
 
 ubuntu_only_bases="$test_dir/supported_bases-ubuntu-only.json"
-jq '.bases = [.bases[0]]' "$base_manifest" > "$ubuntu_only_bases"
+jq '.bases |= map(select(.id == "ubuntu24.04"))' "$base_manifest" > "$ubuntu_only_bases"
 assert_fails "$base_validator" "$ubuntu_only_bases"
 "$base_validator" --allow-multiple "$ubuntu_only_bases"
 
 debian_only_bases="$test_dir/supported_bases-debian-only.json"
-jq '.bases = [.bases[1]]' "$base_manifest" > "$debian_only_bases"
+jq '.bases |= map(select(.id == "debian13"))' "$base_manifest" > "$debian_only_bases"
 assert_fails "$base_validator" "$debian_only_bases"
 "$base_validator" --allow-multiple "$debian_only_bases"
 
 two_base_bases="$test_dir/supported_bases-two-production.json"
-jq '.bases = .bases[0:2]' "$base_manifest" > "$two_base_bases"
+jq '.bases |= map(select(.id == "ubuntu24.04" or .id == "debian13"))' \
+  "$base_manifest" > "$two_base_bases"
 assert_fails "$base_validator" "$two_base_bases"
 "$base_validator" --allow-multiple "$two_base_bases"
 
 debian_slim_bases="$test_dir/supported_bases-debian-slim.json"
-jq '.bases = [.bases[2]]' \
+jq '.bases |= map(select(.id == "debian13-slim"))' \
   "$base_manifest" > "$debian_slim_bases"
 assert_fails "$base_validator" "$debian_slim_bases"
 
-third_base_bases="$test_dir/supported_bases-three.json"
+fifth_base_bases="$test_dir/supported_bases-fifth.json"
 jq '.bases += [{
   "id": "debian13-extra",
   "family": "debian",
   "version": "13",
   "variant": "default",
   "reference": "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-}]' "$base_manifest" > "$third_base_bases"
-assert_fails "$base_validator" "$third_base_bases"
+}]' "$base_manifest" > "$fifth_base_bases"
+assert_fails "$base_validator" "$fifth_base_bases"
 
 wrong_order_bases="$test_dir/supported_bases-wrong-order.json"
-jq '.bases = [.bases[1], .bases[0], .bases[2]]' "$base_manifest" > "$wrong_order_bases"
+jq '.bases = [.bases[1], .bases[0], .bases[2], .bases[3]]' \
+  "$base_manifest" > "$wrong_order_bases"
 assert_fails "$base_validator" "$wrong_order_bases"
 "$base_validator" --allow-multiple "$wrong_order_bases"
 
-duplicate_debian_slim_bases="$test_dir/supported_bases-duplicate-debian-slim.json"
-jq '.bases[1] = .bases[2]' "$base_manifest" > "$duplicate_debian_slim_bases"
-assert_fails "$base_validator" "$duplicate_debian_slim_bases"
+duplicate_ubuntu26_bases="$test_dir/supported_bases-duplicate-ubuntu26.json"
+jq '.bases |= . + [(.[] | select(.id == "ubuntu26.04"))]' \
+  "$base_manifest" > "$duplicate_ubuntu26_bases"
+assert_fails "$base_validator" "$duplicate_ubuntu26_bases"
+
+pre_ubuntu26_bases="$test_dir/supported_bases-pre-ubuntu26.json"
+jq '.bases |= map(select(.id != "ubuntu26.04"))' "$base_manifest" > "$pre_ubuntu26_bases"
+assert_fails "$base_validator" "$pre_ubuntu26_bases"
+"$base_validator" --allow-multiple "$pre_ubuntu26_bases"
+
+only_ubuntu26_bases="$test_dir/supported_bases-ubuntu26-only.json"
+jq '.bases |= map(select(.id == "ubuntu26.04"))' "$base_manifest" > "$only_ubuntu26_bases"
+assert_fails "$base_validator" "$only_ubuntu26_bases"
+"$base_validator" --allow-multiple "$only_ubuntu26_bases"
 
 for filter in \
-  '.bases[1].family = "ubuntu"' \
-  '.bases[1].version = "12"' \
-  '.bases[1].variant = "slim"' \
-  '.bases[1].reference = "debian:12@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'
+  '.bases |= map(if .id == "ubuntu26.04" then .family = "debian" else . end)' \
+  '.bases |= map(if .id == "ubuntu26.04" then .version = "24.04" else . end)' \
+  '.bases |= map(if .id == "ubuntu26.04" then .variant = "slim" else . end)' \
+  '.bases |= map(if .id == "ubuntu26.04" then .reference = "ubuntu:24.04@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" else . end)' \
+  '.bases |= map(if .id == "ubuntu26.04" then .reference = "ubuntu:26.10@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" else . end)'
+do
+  jq "$filter" "$base_manifest" > "$test_dir/invalid-ubuntu26-bases.json"
+  assert_fails "$base_validator" "$test_dir/invalid-ubuntu26-bases.json"
+done
+
+for filter in \
+  '.bases |= map(if .id == "debian13" then .family = "ubuntu" else . end)' \
+  '.bases |= map(if .id == "debian13" then .version = "12" else . end)' \
+  '.bases |= map(if .id == "debian13" then .variant = "slim" else . end)' \
+  '.bases |= map(if .id == "debian13" then .reference = "debian:12@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" else . end)'
 do
   jq "$filter" "$base_manifest" > "$test_dir/invalid-debian-bases.json"
   assert_fails "$base_validator" "$test_dir/invalid-debian-bases.json"
 done
 
 for filter in \
-  '.bases[2].variant = "default"' \
-  '.bases[2].reference = "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
-  '.bases[2].family = "ubuntu"' \
-  '.bases[2].version = "12"'
+  '.bases |= map(if .id == "debian13-slim" then .variant = "default" else . end)' \
+  '.bases |= map(if .id == "debian13-slim" then .reference = "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" else . end)' \
+  '.bases |= map(if .id == "debian13-slim" then .family = "ubuntu" else . end)' \
+  '.bases |= map(if .id == "debian13-slim" then .version = "12" else . end)'
 do
   jq "$filter" "$base_manifest" > "$test_dir/invalid-debian-slim-bases.json"
   assert_fails "$base_validator" "$test_dir/invalid-debian-slim-bases.json"
 done
 
 synthetic_bases="$test_dir/supported_bases-two.json"
-jq '.bases = .bases[0:2] | .bases[1].reference = "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+jq '.bases |= (map(select(.id == "ubuntu24.04" or .id == "debian13"))
+  | map(if .id == "debian13" then .reference = "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" else . end))' \
   "$base_manifest" > "$synthetic_bases"
 assert_fails "$base_validator" "$synthetic_bases"
 "$base_validator" --allow-multiple "$synthetic_bases"
@@ -297,7 +325,7 @@ fixture_dockerfile_plan="$(cd "$fixture_repo" && "$publication_classifier" --rev
   "$fixture_docs_head" "$fixture_toolchain_head" "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$fixture_dockerfile_plan"
 fixture_dockerfile_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_dockerfile_plan")"
-[[ "$(jq -er '.include | length' <<< "$fixture_dockerfile_matrix")" == 9 ]] \
+[[ "$(jq -er '.include | length' <<< "$fixture_dockerfile_matrix")" == 12 ]] \
   || fail 'Dockerfile revision range did not plan the full matrix'
 
 printf 'Dockerfile exclusions\n' > "$fixture_repo/.dockerignore"
@@ -308,7 +336,7 @@ fixture_dockerignore_plan="$(cd "$fixture_repo" && "$publication_classifier" --r
   "$fixture_toolchain_head" "$fixture_dockerignore_head" "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$fixture_dockerignore_plan"
 fixture_dockerignore_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_dockerignore_plan")"
-[[ "$(jq -er '.include | length' <<< "$fixture_dockerignore_matrix")" == 9 ]] \
+[[ "$(jq -er '.include | length' <<< "$fixture_dockerignore_matrix")" == 12 ]] \
   || fail '.dockerignore revision range did not plan the full matrix'
 
 mkdir -p "$fixture_repo/scripts"
@@ -320,7 +348,7 @@ fixture_metadata_plan="$(cd "$fixture_repo" && "$publication_classifier" --revis
   "$fixture_dockerignore_head" "$fixture_metadata_head" "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$fixture_metadata_plan"
 fixture_metadata_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_metadata_plan")"
-[[ "$(jq -er '.include | length' <<< "$fixture_metadata_matrix")" == 9 ]] \
+[[ "$(jq -er '.include | length' <<< "$fixture_metadata_matrix")" == 12 ]] \
   || fail 'image metadata revision range did not plan the full matrix'
 
 mkdir -p "$fixture_repo/.github/workflows" "$fixture_repo/scripts" "$fixture_repo/tests"
@@ -356,7 +384,7 @@ dispatch_plan="$("$publication_classifier" --workflow-dispatch "$publish_base" "
 assert_contains 'publish_mode=full' "$dispatch_plan"
 assert_contains 'publish_needed=true' "$dispatch_plan"
 dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_plan")"
-[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 9 ]] \
+[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 12 ]] \
   || fail 'workflow_dispatch did not plan every supported Flutter/base row'
 
 migration_repo="$test_dir/base-migration-repo"
@@ -365,16 +393,16 @@ git -C "$migration_repo" config user.name base-migration-test
 git -C "$migration_repo" config user.email base-migration-test@example.invalid
 mkdir -p "$migration_repo/scripts"
 cp "$publish_base" "$migration_repo/supported_version.json"
-cp "$two_base_bases" "$migration_repo/supported_bases.json"
-printf 'two-base validation policy\n' > "$migration_repo/scripts/validate-supported-bases.sh"
+cp "$pre_ubuntu26_bases" "$migration_repo/supported_bases.json"
+printf 'three-base validation policy\n' > "$migration_repo/scripts/validate-supported-bases.sh"
 git -C "$migration_repo" add \
   supported_version.json \
   supported_bases.json \
   scripts/validate-supported-bases.sh
-git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: historical two-base manifest'
+git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: historical three-base manifest'
 migration_base="$(git -C "$migration_repo" rev-parse HEAD)"
 cp "$base_manifest" "$migration_repo/supported_bases.json"
-printf 'three-base validation policy\n' > "$migration_repo/scripts/validate-supported-bases.sh"
+printf 'four-base validation policy\n' > "$migration_repo/scripts/validate-supported-bases.sh"
 git -C "$migration_repo" add \
   supported_bases.json \
   scripts/validate-supported-bases.sh
@@ -388,9 +416,9 @@ migration_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$migration_plan")"
 jq -e '
   (.include | length == 3)
   and
-  (all(.include[]; .base_id == "debian13-slim"))
+  (all(.include[]; .base_id == "ubuntu26.04"))
 ' <<< "$migration_matrix" >/dev/null \
-  || fail 'two-base to three-base migration did not plan Debian Slim rows'
+  || fail 'three-base to four-base migration did not plan Ubuntu 26.04 rows'
 migration_ci="$(cd "$migration_repo" && "$classifier" --revisions \
   "$migration_base" "$migration_head")"
 [[ "$migration_ci" == 'requires_toolchain_ci=true' ]] \
@@ -454,7 +482,7 @@ selective_plan="$(cd "$publication_repo" && "$publication_classifier" --revision
 assert_contains 'publish_mode=selective' "$selective_plan"
 assert_contains 'publish_needed=true' "$selective_plan"
 selective_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$selective_plan")"
-[[ "$(jq -er '.include | length' <<< "$selective_matrix")" == 3 ]] \
+[[ "$(jq -er '.include | length' <<< "$selective_matrix")" == 4 ]] \
   || fail 'selective planner did not contain one patch replacement for all bases'
 [[ "$(jq -er 'all(.include[]; .version == "1.2.4")' <<< "$selective_matrix")" == true ]] \
   || fail 'selective planner omitted the replacement patch'
@@ -489,7 +517,7 @@ new_minor_plan="$(cd "$publication_repo" && "$publication_classifier" --revision
 assert_contains 'publish_mode=selective' "$new_minor_plan"
 assert_contains 'publish_needed=true' "$new_minor_plan"
 new_minor_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$new_minor_plan")"
-[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 3 ]] \
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 4 ]] \
   || fail 'new-minor planner did not contain one release for all bases'
 [[ "$(jq -er 'all(.include[]; .version == "2.1.0")' <<< "$new_minor_matrix")" == true ]] \
   || fail 'new-minor planner omitted the new release'
@@ -507,7 +535,7 @@ readme_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$readme_plan")"
   || fail 'README-only planner attempted publication'
 
 current_base_update="$test_dir/current-base-update.json"
-jq '.bases[0].reference = "ubuntu:24.04@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"' \
+jq '.bases |= map(if .id == "ubuntu24.04" then .reference = "ubuntu:24.04@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" else . end)' \
   "$base_manifest" > "$current_base_update"
 cp "$current_base_update" "$publication_repo/supported_bases.json"
 git -C "$publication_repo" add supported_bases.json
@@ -569,13 +597,13 @@ jq '
 ' "$publish_base" > "$test_dir/publish-patch.json"
 patch_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-patch.json" \
   "$publish_base_bases" "$publish_base_bases")"
-[[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 3 ]] \
+[[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 4 ]] \
   || fail 'publish matrix did not contain one patch replacement for all bases'
 [[ "$(jq -er 'all(.include[]; .version == "1.2.4")' <<< "$patch_matrix")" == true ]] \
   || fail 'publish matrix omitted the replacement patch'
-[[ "$(jq -er '[.include[].base_id] | sort == ["debian13", "debian13-slim", "ubuntu24.04"]' \
+[[ "$(jq -er '[.include[].base_id] | sort == ["debian13", "debian13-slim", "ubuntu24.04", "ubuntu26.04"]' \
   <<< "$patch_matrix")" == true ]] \
-  || fail 'publish matrix did not cover all three production bases'
+  || fail 'publish matrix did not cover all four production bases'
 
 jq '.supported_versions += [{
   "version": "2.1.0",
@@ -586,7 +614,7 @@ jq '.supported_versions += [{
 }]' "$publish_base" > "$test_dir/publish-new-minor.json"
 new_minor_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-new-minor.json" \
   "$publish_base_bases" "$publish_base_bases")"
-[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 3 ]] \
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 4 ]] \
   || fail 'publish matrix did not contain one new minor for all bases'
 [[ "$(jq -er 'all(.include[]; .version == "2.1.0")' <<< "$new_minor_matrix")" == true ]] \
   || fail 'publish matrix omitted the new minor'
@@ -617,34 +645,34 @@ new_minor_two_base_matrix="$("$publish_matrix_script" "$publish_base" \
   || fail 'new Flutter release should publish across every current base'
 
 changed_base="$test_dir/supported_bases-changed.json"
-jq '.bases[0].reference = "ubuntu:24.04@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
-  "$synthetic_bases" > "$changed_base"
+jq '.bases |= map(if .id == "ubuntu26.04" then .reference = "ubuntu:26.04@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" else . end)' \
+  "$base_manifest" > "$changed_base"
 changed_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" \
-  "$synthetic_bases" "$changed_base")"
+  "$base_manifest" "$changed_base")"
 [[ "$(jq -er '.include | length' <<< "$changed_base_matrix")" == 3 ]] \
   || fail 'base digest change should publish every current Flutter for that base'
-[[ "$(jq -er '[.include[] | select(.base_id == "ubuntu24.04")] | length' <<< "$changed_base_matrix")" == 3 ]] \
+[[ "$(jq -er '[.include[] | select(.base_id == "ubuntu26.04")] | length' <<< "$changed_base_matrix")" == 3 ]] \
   || fail 'base digest change selected the wrong base'
 
 new_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" \
-  "$two_base_bases" "$base_manifest")"
+  "$pre_ubuntu26_bases" "$base_manifest")"
 jq -e '
   (.include | length == 3)
   and
-  (all(.include[]; .base_id == "debian13-slim"))
+  (all(.include[]; .base_id == "ubuntu26.04"))
 ' <<< "$new_base_matrix" >/dev/null \
-  || fail 'new Slim base should publish every current Flutter for Debian Slim only'
+  || fail 'new Ubuntu 26.04 base should publish every current Flutter for Ubuntu 26.04 only'
 
 retired_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" \
-  "$base_manifest" "$two_base_bases")"
+  "$base_manifest" "$pre_ubuntu26_bases")"
 [[ "$(jq -er '.include | length' <<< "$retired_base_matrix")" == 0 ]] \
   || fail 'base retirement should publish nothing'
 
 union_matrix="$("$publish_matrix_script" "$publish_base" \
-  "$test_dir/publish-patch.json" "$synthetic_bases" "$changed_base")"
-[[ "$(jq -er '.include | length' <<< "$union_matrix")" == 4 ]] \
+  "$test_dir/publish-patch.json" "$base_manifest" "$changed_base")"
+[[ "$(jq -er '.include | length' <<< "$union_matrix")" == 6 ]] \
   || fail 'Flutter and base changes should use their union'
-[[ "$(jq -er '[.include[] | [.version, .base_id]] | unique | length' <<< "$union_matrix")" == 4 ]] \
+[[ "$(jq -er '[.include[] | [.version, .base_id]] | unique | length' <<< "$union_matrix")" == 6 ]] \
   || fail 'union publication matrix contains duplicate pairs'
 
 jq '.schema = 2' "$synthetic_bases" > "$test_dir/invalid-old-bases.json"
@@ -710,6 +738,28 @@ assert_contains 'base_digest_short=224a1869083a' "$metadata"
 assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
 assert_contains 'tag=3.47.3-ubuntu24.04-224a1869083a' "$metadata"
 assert_contains 'build_tag=3.47.3-ubuntu24.04-224a1869083a-gc9a6c484230f' \
+  "$metadata"
+
+ubuntu26_reference="$(
+  jq -er '.bases[] | select(.id == "ubuntu26.04") | .reference' \
+    "$base_manifest"
+)"
+ubuntu26_digest="${ubuntu26_reference##*@}"
+ubuntu26_hex="${ubuntu26_digest#sha256:}"
+ubuntu26_short="${ubuntu26_hex:0:12}"
+metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
+  c9a6c484230f8b5e408ec57be1ef71dee1e77020 ubuntu26.04 "$base_manifest")"
+assert_contains 'flutter_version=3.47.3' "$metadata"
+assert_contains 'base_id=ubuntu26.04' "$metadata"
+assert_contains 'base_family=ubuntu' "$metadata"
+assert_contains 'base_version=26.04' "$metadata"
+assert_contains 'base_variant=default' "$metadata"
+assert_contains "base_reference=$ubuntu26_reference" "$metadata"
+assert_contains "base_digest=$ubuntu26_digest" "$metadata"
+assert_contains "base_digest_short=$ubuntu26_short" "$metadata"
+assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
+assert_contains "tag=3.47.3-ubuntu26.04-$ubuntu26_short" "$metadata"
+assert_contains "build_tag=3.47.3-ubuntu26.04-$ubuntu26_short-gc9a6c484230f" \
   "$metadata"
 
 metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \

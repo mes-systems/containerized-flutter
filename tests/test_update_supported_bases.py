@@ -311,6 +311,13 @@ class ReferenceAndHTTPTest(unittest.TestCase):
 class UpdateCalculationTest(unittest.TestCase):
     def setUp(self):
         self.old_ubuntu = base_entry(marker="1")
+        self.old_ubuntu26 = base_entry(
+            base_id="ubuntu26.04",
+            family="ubuntu",
+            version="26.04",
+            tag="26.04",
+            marker="4",
+        )
         self.old_debian = base_entry(
             base_id="debian13", family="debian", version="13", tag="13", marker="2"
         )
@@ -323,6 +330,7 @@ class UpdateCalculationTest(unittest.TestCase):
         )
         self.old_slim["variant"] = "slim"
         self.ubuntu_new = "sha256:" + "a" * 64
+        self.ubuntu26_new = "sha256:" + "d" * 64
         self.debian_new = "sha256:" + "b" * 64
         self.slim_new = "sha256:" + "c" * 64
 
@@ -371,6 +379,51 @@ class UpdateCalculationTest(unittest.TestCase):
             resolver=resolver_for(**{"ubuntu:24.04": self.ubuntu_new, "debian:13": self.debian_new}),
         )
         self.assertEqual([change["base_id"] for change in summary["changes"]], ["ubuntu24.04", "debian13"])
+
+    def test_two_ubuntu_release_lines_are_resolved_independently(self):
+        manifest = base_manifest(
+            self.old_ubuntu,
+            self.old_ubuntu26,
+            self.old_debian,
+            self.old_slim,
+        )
+        case_dir = Path(tempfile.mkdtemp(prefix="base-updater-ubuntu-lines-test-"))
+        self.addCleanup(shutil.rmtree, case_dir)
+        manifest_path = case_dir / "supported_bases.json"
+        readme_path = case_dir / "README.md"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        readme_path.write_text(updater.render_supported_bases(manifest), encoding="utf-8")
+        args = SimpleNamespace(manifest=str(manifest_path), readme=str(readme_path), write=True, check=False)
+
+        summary, _ = updater.run(
+            args,
+            resolver=resolver_for(
+                **{
+                    "ubuntu:24.04": self.old_ubuntu["reference"].split("@", 1)[1],
+                    "ubuntu:26.04": self.ubuntu26_new,
+                    "debian:13": self.old_debian["reference"].split("@", 1)[1],
+                    "debian:13-slim": self.old_slim["reference"].split("@", 1)[1],
+                }
+            ),
+        )
+        self.assertEqual(summary["status"], "update")
+        self.assertEqual(
+            [change["base_id"] for change in summary["changes"]],
+            ["ubuntu26.04"],
+        )
+
+        updated = json.loads(manifest_path.read_text(encoding="utf-8"))
+        updated_by_id = {base["id"]: base for base in updated["bases"]}
+        self.assertEqual(updated_by_id["ubuntu24.04"]["reference"], self.old_ubuntu["reference"])
+        self.assertEqual(
+            updated_by_id["ubuntu26.04"]["reference"],
+            "ubuntu:26.04@" + self.ubuntu26_new,
+        )
+        self.assertEqual(updated_by_id["debian13"]["reference"], self.old_debian["reference"])
+        self.assertEqual(updated_by_id["debian13-slim"]["reference"], self.old_slim["reference"])
+        updated_readme = readme_path.read_text(encoding="utf-8")
+        self.assertIn("| `ubuntu24.04` | ubuntu | 24.04 | default |", updated_readme)
+        self.assertIn("| `ubuntu26.04` | ubuntu | 26.04 | default |", updated_readme)
 
     def test_only_slim_digest_change_updates_slim_and_renders_one_change(self):
         manifest = base_manifest(self.old_ubuntu, self.old_debian, self.old_slim)
