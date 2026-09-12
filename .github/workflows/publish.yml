@@ -175,7 +175,7 @@ jobs:
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
+          push-to-registry: false
           create-storage-record: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
