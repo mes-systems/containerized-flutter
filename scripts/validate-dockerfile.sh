@@ -20,6 +20,8 @@ stage=-1
 from_count=0
 builder_stage=-1
 final_stage=-1
+global_base_arg_count=0
+base_contract_count=0
 
 while IFS= read -r line; do
   line="${line#"${line%%[!$' \t\r']*}"}"
@@ -29,11 +31,31 @@ while IFS= read -r line; do
   rest="${line:${#instruction}}"
   instruction_upper="$(printf '%s' "$instruction" | tr '[:lower:]' '[:upper:]')"
   case "$instruction_upper" in
+    ARG)
+      if [[ "$rest" =~ ^[[:space:]]*BASE_IMAGE[[:space:]]*= ]]; then
+        fail 'BASE_IMAGE ARG must not have a default value'
+      fi
+      read -r -a arg_args <<< "$rest"
+      if [[ "$stage" == -1 && "${#arg_args[@]}" == 1 \
+        && "${arg_args[0]}" == BASE_IMAGE ]]; then
+        global_base_arg_count=$((global_base_arg_count + 1))
+      fi
+      ;;
     FROM)
       from_count=$((from_count + 1))
       stage=$((stage + 1))
       final_stage="$stage"
       read -r -a from_args <<< "$rest"
+      from_image=""
+      for token in "${from_args[@]}"; do
+        if [[ "$token" != --* ]]; then
+          from_image="$token"
+          break
+        fi
+      done
+      [[ "$from_image" == '${BASE_IMAGE}' ]] \
+        || fail 'every FROM must use ${BASE_IMAGE}'
+      base_contract_count=$((base_contract_count + 1))
       for ((i = 0; i + 1 < ${#from_args[@]}; i++)); do
         from_keyword="$(printf '%s' "${from_args[i]}" | tr '[:upper:]' '[:lower:]')"
         if [[ "$from_keyword" == as && "${from_args[i + 1]}" == flutter-sdk ]]; then
@@ -64,7 +86,10 @@ done < <(awk '
   }
 ' "$dockerfile")
 
+((global_base_arg_count == 1)) || fail 'missing global ARG BASE_IMAGE'
 ((from_count == 2)) || fail 'expected exactly two FROM stages'
+((base_contract_count == from_count)) \
+  || fail 'every FROM must use the global BASE_IMAGE argument'
 [[ "$builder_stage" != -1 ]] || fail 'missing named flutter-sdk builder stage'
 [[ "$builder_stage" != "$final_stage" ]] || fail 'flutter-sdk must be a non-final stage'
 

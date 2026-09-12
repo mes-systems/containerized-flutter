@@ -23,6 +23,9 @@ jobs:
       - name: Validate supported version manifest
         run: scripts/validate-supported-versions.sh supported_version.json
 
+      - name: Validate supported base manifest
+        run: scripts/validate-supported-bases.sh supported_bases.json
+
       - name: Run script guardrails
         run: tests/scripts_test.sh
 
@@ -53,7 +56,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          matrix="$(jq -c '{include: [.supported_versions[] | {version, channel, revision, archive, archive_sha256}]}' supported_version.json)"
+          matrix="$(scripts/build-matrix.sh supported_version.json supported_bases.json)"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   build:
@@ -87,7 +90,12 @@ jobs:
 
       - name: Derive image metadata
         id: metadata
-        run: scripts/image-metadata.sh "${{ matrix.version }}" "${{ github.sha }}" Dockerfile
+        run: |
+          scripts/image-metadata.sh \
+            "${{ matrix.version }}" \
+            "${{ github.sha }}" \
+            "${{ matrix.base_id }}" \
+            supported_bases.json
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -102,9 +110,10 @@ jobs:
           push: false
           provenance: false
           tags: ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }}
-          cache-from: type=gha,scope=flutter-${{ matrix.version }}
-          cache-to: type=gha,mode=max,scope=flutter-${{ matrix.version }}
+          cache-from: type=gha,scope=flutter-${{ matrix.version }}-${{ matrix.base_id }}
+          cache-to: type=gha,mode=max,scope=flutter-${{ matrix.version }}-${{ matrix.base_id }}
           build-args: |
+            BASE_IMAGE=${{ matrix.base_reference }}
             FLUTTER_VERSION=${{ matrix.version }}
             FLUTTER_CHANNEL=${{ matrix.channel }}
             FLUTTER_REVISION=${{ matrix.revision }}

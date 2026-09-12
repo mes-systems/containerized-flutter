@@ -1,13 +1,5 @@
 version: 2
 updates:
-  - package-ecosystem: docker
-    directory: "/"
-    schedule:
-      interval: weekly
-    ignore:
-      - dependency-name: ubuntu
-        versions:
-          - "> 24.04"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
