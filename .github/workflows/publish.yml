@@ -74,7 +74,6 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.manifest.outputs.publish_matrix) }}
@@ -175,8 +174,8 @@ jobs:
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: true
+          push-to-registry: false
+          create-storage-record: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Remove tested image
