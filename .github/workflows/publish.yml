@@ -215,12 +215,17 @@ jobs:
           [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$registry_digest" == "$expected_digest" ]]
 
+          expected_base_digest="${{ matrix.base_reference }}"
+          expected_base_digest="${expected_base_digest##*@}"
+          expected_base_digest="${expected_base_digest#sha256:}"
+          [[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]
+
           provenance="$(
             docker buildx imagetools inspect \
               "$IMAGE_NAME:$BUILD_TAG" \
               --format '{{json .Provenance.SLSA}}'
           )"
-          jq -e '
+          jq --arg digest "$expected_base_digest" -e '
             type == "object"
             and (.buildDefinition | type == "object")
             and (.runDetails | type == "object")
@@ -231,6 +236,12 @@ jobs:
             and (
               .buildDefinition.resolvedDependencies
               | type == "array" and length > 0
+            )
+            and (
+              any(
+                .buildDefinition.resolvedDependencies[];
+                .digest.sha256 == $digest
+              )
             )
             and (
               .buildDefinition.internalParameters.buildConfig.llbDefinition
