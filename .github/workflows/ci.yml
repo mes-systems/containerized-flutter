@@ -90,11 +90,12 @@ jobs:
 
       - name: Derive image metadata
         id: metadata
-        run: scripts/image-metadata.sh \
-          "${{ matrix.version }}" \
-          "${{ github.sha }}" \
-          "${{ matrix.base_id }}" \
-          supported_bases.json
+        run: |
+          scripts/image-metadata.sh \
+            "${{ matrix.version }}" \
+            "${{ github.sha }}" \
+            "${{ matrix.base_id }}" \
+            supported_bases.json
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
