@@ -7,6 +7,13 @@
       "version": "24.04",
       "variant": "default",
       "reference": "ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254"
+    },
+    {
+      "id": "debian13",
+      "family": "debian",
+      "version": "13",
+      "variant": "default",
+      "reference": "debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1"
     }
   ]
 }

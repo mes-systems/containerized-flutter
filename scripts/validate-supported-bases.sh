@@ -49,8 +49,8 @@ jq -e '.bases | type == "array" and length > 0' \
   "$manifest" >/dev/null || fail 'bases must be a non-empty array'
 
 base_count="$(jq -er '.bases | length' "$manifest")" || fail 'bases length is unavailable'
-if [[ "$allow_multiple" != true && "$base_count" != 1 ]]; then
-  fail 'PR A supports exactly one base'
+if [[ "$allow_multiple" != true && "$base_count" != 2 ]]; then
+  fail 'production manifest must contain exactly two base records'
 fi
 
 while IFS= read -r base; do
@@ -94,16 +94,23 @@ duplicates="$(jq -r '.bases[].id' "$manifest" | sort | uniq -d)"
 [[ -z "$duplicates" ]] || fail "duplicate base id: $duplicates"
 
 if [[ "$allow_multiple" != true ]]; then
-  base="$(jq -c '.bases[0]' "$manifest")"
-  expected_family=ubuntu
-  expected_version=24.04
-  expected_reference_prefix="$expected_family:$expected_version@sha256:"
-  [[ "$(jq -r '.id' <<< "$base")" == ubuntu24.04 \
-    && "$(jq -r '.family' <<< "$base")" == "$expected_family" \
-    && "$(jq -r '.version' <<< "$base")" == "$expected_version" \
-    && "$(jq -r '.variant' <<< "$base")" == default \
-    && "$(jq -r '.reference' <<< "$base")" == "$expected_reference_prefix"* ]] \
-    || fail 'PR A supports only ubuntu24.04 with the Ubuntu 24.04 reference'
+  [[ "$(jq -r '.bases | map(.id) | join(" ")' "$manifest")" == \
+    'ubuntu24.04 debian13' ]] \
+    || fail 'production bases must be ordered ubuntu24.04, debian13'
+
+  ubuntu="$(jq -c '.bases[0]' "$manifest")"
+  [[ "$(jq -r '.family' <<< "$ubuntu")" == ubuntu \
+    && "$(jq -r '.version' <<< "$ubuntu")" == 24.04 \
+    && "$(jq -r '.variant' <<< "$ubuntu")" == default \
+    && "$(jq -r '.reference' <<< "$ubuntu")" == 'ubuntu:24.04@sha256:'* ]] \
+    || fail 'production ubuntu24.04 base record is invalid'
+
+  debian="$(jq -c '.bases[1]' "$manifest")"
+  [[ "$(jq -r '.family' <<< "$debian")" == debian \
+    && "$(jq -r '.version' <<< "$debian")" == 13 \
+    && "$(jq -r '.variant' <<< "$debian")" == default \
+    && "$(jq -r '.reference' <<< "$debian")" == 'debian:13@sha256:'* ]] \
+    || fail 'production debian13 base record is invalid'
 fi
 
 printf 'valid: %s\n' "$manifest"

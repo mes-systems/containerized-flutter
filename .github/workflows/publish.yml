@@ -69,6 +69,7 @@ jobs:
             supported_version.json supported_bases.json >> "$GITHUB_OUTPUT"
 
   publish:
+    name: publish (${{ matrix.version }}, ${{ matrix.base_id }})
     if: >-
       github.ref == 'refs/heads/main' &&
       needs.manifest.outputs.publish_needed == 'true'

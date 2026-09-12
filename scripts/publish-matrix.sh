@@ -27,7 +27,7 @@ done
 "$SCRIPT_DIR/validate-supported-versions.sh" "$new_flutter" >/dev/null \
   || fail "invalid new Flutter manifest: $new_flutter"
 # Allow synthetic multi-base fixtures here; classify-publication validates the
-# production manifests in strict PR A mode before invoking this planner.
+# production manifests in strict production mode before invoking this planner.
 "$SCRIPT_DIR/validate-supported-bases.sh" --allow-multiple "$old_bases" >/dev/null \
   || fail "invalid old base manifest: $old_bases"
 "$SCRIPT_DIR/validate-supported-bases.sh" --allow-multiple "$new_bases" >/dev/null \

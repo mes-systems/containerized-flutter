@@ -61,13 +61,16 @@ python3 "$ROOT_DIR/tests/test_update_supported_versions.py"
 python3 "$ROOT_DIR/tests/test_update_supported_bases.py"
 "$dockerfile_guard" "$ROOT_DIR/Dockerfile"
 current_matrix="$("$build_matrix_script" "$manifest" "$base_manifest")"
-[[ "$(jq -er '.include | length' <<< "$current_matrix")" == 3 ]] \
-  || fail 'current build matrix must contain three Flutter/base rows'
+[[ "$(jq -er '.include | length' <<< "$current_matrix")" == 6 ]] \
+  || fail 'current build matrix must contain six Flutter/base rows'
 jq -e '
   [.include[] | [.version, .base_id]]
   == [["3.41.9", "ubuntu24.04"],
+      ["3.41.9", "debian13"],
       ["3.44.9", "ubuntu24.04"],
-      ["3.47.3", "ubuntu24.04"]]
+      ["3.44.9", "debian13"],
+      ["3.47.3", "ubuntu24.04"],
+      ["3.47.3", "debian13"]]
 ' <<< "$current_matrix" >/dev/null \
   || fail 'current build matrix has unexpected Flutter/base pairs'
 
@@ -130,7 +133,7 @@ assert_publication_mode full Dockerfile supported_version.json
 dispatch_mode="$("$publication_classifier" --workflow-dispatch "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$dispatch_mode"
 dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_mode")"
-[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 3 ]] \
+[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 6 ]] \
   || fail 'workflow_dispatch did not plan every supported Flutter/base row'
 assert_fails "$publication_classifier" --revisions not-a-base not-a-head
 
@@ -165,15 +168,49 @@ do
   assert_fails "$base_validator" "$test_dir/invalid-bases.json"
 done
 
-synthetic_bases="$test_dir/supported_bases-two.json"
+ubuntu_only_bases="$test_dir/supported_bases-ubuntu-only.json"
+jq '.bases = [.bases[0]]' "$base_manifest" > "$ubuntu_only_bases"
+assert_fails "$base_validator" "$ubuntu_only_bases"
+"$base_validator" --allow-multiple "$ubuntu_only_bases"
+
+debian_only_bases="$test_dir/supported_bases-debian-only.json"
+jq '.bases = [.bases[1]]' "$base_manifest" > "$debian_only_bases"
+assert_fails "$base_validator" "$debian_only_bases"
+"$base_validator" --allow-multiple "$debian_only_bases"
+
+debian_slim_bases="$test_dir/supported_bases-debian-slim.json"
+jq '.bases[1].id = "debian13-slim" | .bases[1].variant = "slim"' \
+  "$base_manifest" > "$debian_slim_bases"
+assert_fails "$base_validator" "$debian_slim_bases"
+
+third_base_bases="$test_dir/supported_bases-three.json"
 jq '.bases += [{
-  "id": "debian13",
+  "id": "debian13-slim",
   "family": "debian",
   "version": "13",
-  "variant": "default",
+  "variant": "slim",
   "reference": "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-}]' "$base_manifest" > "$synthetic_bases"
-assert_fails "$base_validator" "$synthetic_bases"
+}]' "$base_manifest" > "$third_base_bases"
+assert_fails "$base_validator" "$third_base_bases"
+
+duplicate_debian_bases="$test_dir/supported_bases-duplicate-debian.json"
+jq '.bases += [.bases[1]]' "$base_manifest" > "$duplicate_debian_bases"
+assert_fails "$base_validator" "$duplicate_debian_bases"
+
+for filter in \
+  '.bases[1].family = "ubuntu"' \
+  '.bases[1].version = "12"' \
+  '.bases[1].variant = "slim"' \
+  '.bases[1].reference = "debian:12@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'
+do
+  jq "$filter" "$base_manifest" > "$test_dir/invalid-debian-bases.json"
+  assert_fails "$base_validator" "$test_dir/invalid-debian-bases.json"
+done
+
+synthetic_bases="$test_dir/supported_bases-two.json"
+jq '.bases[1].reference = "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+  "$base_manifest" > "$synthetic_bases"
+"$base_validator" "$synthetic_bases"
 "$base_validator" --allow-multiple "$synthetic_bases"
 
 synthetic_matrix="$("$build_matrix_script" "$ROOT_DIR/tests/fixtures/supported_version.json" "$synthetic_bases")"
@@ -264,8 +301,33 @@ dispatch_plan="$("$publication_classifier" --workflow-dispatch "$publish_base" "
 assert_contains 'publish_mode=full' "$dispatch_plan"
 assert_contains 'publish_needed=true' "$dispatch_plan"
 dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_plan")"
-[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 3 ]] \
+[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 6 ]] \
   || fail 'workflow_dispatch did not plan every supported Flutter/base row'
+
+migration_repo="$test_dir/base-migration-repo"
+git init -q "$migration_repo"
+git -C "$migration_repo" config user.name base-migration-test
+git -C "$migration_repo" config user.email base-migration-test@example.invalid
+cp "$publish_base" "$migration_repo/supported_version.json"
+cp "$ubuntu_only_bases" "$migration_repo/supported_bases.json"
+git -C "$migration_repo" add supported_version.json supported_bases.json
+git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: historical one-base manifest'
+migration_base="$(git -C "$migration_repo" rev-parse HEAD)"
+cp "$base_manifest" "$migration_repo/supported_bases.json"
+git -C "$migration_repo" add supported_bases.json
+git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: add Debian base'
+migration_head="$(git -C "$migration_repo" rev-parse HEAD)"
+migration_plan="$(cd "$migration_repo" && "$publication_classifier" --revisions \
+  "$migration_base" "$migration_head" supported_version.json supported_bases.json)"
+assert_contains 'publish_mode=selective' "$migration_plan"
+assert_contains 'publish_needed=true' "$migration_plan"
+migration_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$migration_plan")"
+jq -e '
+  (.include | length == 3)
+  and
+  (all(.include[]; .base_id == "debian13"))
+' <<< "$migration_matrix" >/dev/null \
+  || fail 'one-base to two-base migration did not plan Debian rows'
 
 publication_repo="$test_dir/publication-repo"
 git init -q "$publication_repo"
@@ -293,9 +355,9 @@ selective_plan="$(cd "$publication_repo" && "$publication_classifier" --revision
 assert_contains 'publish_mode=selective' "$selective_plan"
 assert_contains 'publish_needed=true' "$selective_plan"
 selective_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$selective_plan")"
-[[ "$(jq -er '.include | length' <<< "$selective_matrix")" == 1 ]] \
-  || fail 'selective planner did not contain one patch replacement'
-[[ "$(jq -er '.include[0].version' <<< "$selective_matrix")" == '1.2.4' ]] \
+[[ "$(jq -er '.include | length' <<< "$selective_matrix")" == 2 ]] \
+  || fail 'selective planner did not contain one patch replacement for both bases'
+[[ "$(jq -er 'all(.include[]; .version == "1.2.4")' <<< "$selective_matrix")" == true ]] \
   || fail 'selective planner omitted the replacement patch'
 
 jq '.supported_versions = .supported_versions[1:]' "$publication_repo/supported_version.json" \
@@ -328,9 +390,9 @@ new_minor_plan="$(cd "$publication_repo" && "$publication_classifier" --revision
 assert_contains 'publish_mode=selective' "$new_minor_plan"
 assert_contains 'publish_needed=true' "$new_minor_plan"
 new_minor_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$new_minor_plan")"
-[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 1 ]] \
-  || fail 'new-minor planner did not contain one release'
-[[ "$(jq -er '.include[0].version' <<< "$new_minor_matrix")" == '2.1.0' ]] \
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 2 ]] \
+  || fail 'new-minor planner did not contain one release for both bases'
+[[ "$(jq -er 'all(.include[]; .version == "2.1.0")' <<< "$new_minor_matrix")" == true ]] \
   || fail 'new-minor planner omitted the new release'
 
 printf 'README update\n' >> "$publication_repo/README.md"
@@ -408,9 +470,9 @@ jq '
 ' "$publish_base" > "$test_dir/publish-patch.json"
 patch_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-patch.json" \
   "$publish_base_bases" "$publish_base_bases")"
-[[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 1 ]] \
-  || fail 'publish matrix did not contain one patch replacement'
-[[ "$(jq -er '.include[0].version' <<< "$patch_matrix")" == '1.2.4' ]] \
+[[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 2 ]] \
+  || fail 'publish matrix did not contain one patch replacement for both bases'
+[[ "$(jq -er 'all(.include[]; .version == "1.2.4")' <<< "$patch_matrix")" == true ]] \
   || fail 'publish matrix omitted the replacement patch'
 
 jq '.supported_versions += [{
@@ -422,9 +484,9 @@ jq '.supported_versions += [{
 }]' "$publish_base" > "$test_dir/publish-new-minor.json"
 new_minor_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-new-minor.json" \
   "$publish_base_bases" "$publish_base_bases")"
-[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 1 ]] \
-  || fail 'publish matrix did not contain one new minor'
-[[ "$(jq -er '.include[0].version' <<< "$new_minor_matrix")" == '2.1.0' ]] \
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 2 ]] \
+  || fail 'publish matrix did not contain one new minor for both bases'
+[[ "$(jq -er 'all(.include[]; .version == "2.1.0")' <<< "$new_minor_matrix")" == true ]] \
   || fail 'publish matrix omitted the new minor'
 
 jq '.supported_versions = .supported_versions[1:]' "$publish_base" > "$test_dir/publish-retire-only.json"
@@ -463,14 +525,16 @@ changed_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" 
   || fail 'base digest change selected the wrong base'
 
 new_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" \
-  "$publish_base_bases" "$synthetic_bases")"
-[[ "$(jq -er '.include | length' <<< "$new_base_matrix")" == 3 ]] \
-  || fail 'new base should publish every current Flutter'
-[[ "$(jq -er '[.include[] | select(.base_id == "debian13")] | length' <<< "$new_base_matrix")" == 3 ]] \
-  || fail 'new base rows are missing'
+  "$ubuntu_only_bases" "$synthetic_bases")"
+jq -e '
+  (.include | length == 3)
+  and
+  (all(.include[]; .base_id == "debian13"))
+' <<< "$new_base_matrix" >/dev/null \
+  || fail 'new base should publish every current Flutter for Debian only'
 
 retired_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" \
-  "$synthetic_bases" "$publish_base_bases")"
+  "$synthetic_bases" "$ubuntu_only_bases")"
 [[ "$(jq -er '.include | length' <<< "$retired_base_matrix")" == 0 ]] \
   || fail 'base retirement should publish nothing'
 
@@ -544,6 +608,23 @@ assert_contains 'base_digest_short=224a1869083a' "$metadata"
 assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
 assert_contains 'tag=3.47.3-ubuntu24.04-224a1869083a' "$metadata"
 assert_contains 'build_tag=3.47.3-ubuntu24.04-224a1869083a-gc9a6c484230f' \
+  "$metadata"
+
+metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
+  c9a6c484230f8b5e408ec57be1ef71dee1e77020 debian13 "$base_manifest")"
+assert_contains 'flutter_version=3.47.3' "$metadata"
+assert_contains 'base_id=debian13' "$metadata"
+assert_contains 'base_family=debian' "$metadata"
+assert_contains 'base_version=13' "$metadata"
+assert_contains 'base_variant=default' "$metadata"
+assert_contains 'base_reference=debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1' \
+  "$metadata"
+assert_contains 'base_digest=sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1' \
+  "$metadata"
+assert_contains 'base_digest_short=f324c7ff5432' "$metadata"
+assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
+assert_contains 'tag=3.47.3-debian13-f324c7ff5432' "$metadata"
+assert_contains 'build_tag=3.47.3-debian13-f324c7ff5432-gc9a6c484230f' \
   "$metadata"
 assert_fails "$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
   c9a6c484230f8b5e408ec57be1ef71dee1e77020 unknown-base "$base_manifest"
@@ -631,6 +712,7 @@ assert_no_text_match 'image-metadata\.sh.*Dockerfile' "$ci_source"
 assert_contains '.pull_request.base.sha' "$ci_source"
 assert_contains '.pull_request.head.sha' "$ci_source"
 assert_contains 'if: needs.manifest.outputs.requires_toolchain_ci == '\''true'\''' "$ci_source"
+assert_contains 'name: build (${{ matrix.version }}, ${{ matrix.base_id }})' "$ci_source"
 assert_contains 'name: CI gate' "$ci_source"
 assert_contains 'if: always()' "$ci_source"
 assert_contains 'run: |' "$ci_metadata_source"
@@ -640,6 +722,7 @@ assert_no_text_match 'ref:.*pull_request\.head\.sha' "$ci_source"
 assert_no_text_match 'paths-ignore:' "$ci_source"
 
 assert_contains 'scripts/classify-publication.sh' "$publish_source"
+assert_contains 'name: publish (${{ matrix.version }}, ${{ matrix.base_id }})' "$publish_source"
 publish_metadata_source="$(sed -n '/^      - name: Derive image metadata/,/^      - name: Set up Docker Buildx/p' <<< "$publish_source")"
 assert_contains '.before' "$publish_source"
 assert_contains '.after' "$publish_source"
