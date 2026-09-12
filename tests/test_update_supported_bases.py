@@ -163,16 +163,39 @@ class ReferenceAndHTTPTest(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.normalize_docker_hub_repository("quay.io/foo/bar")
 
-    def test_valid_bearer_token_response_and_request_scope(self):
-        transport = QueueTransport(token_response())
-        self.assertEqual(
-            updater.request_pull_token("ubuntu", transport=transport),
-            "test-bearer-token",
-        )
-        self.assertIn("repository%3Alibrary%2Fubuntu%3Apull", transport.calls[0][0])
+    def test_token_endpoint_accepts_token_fields_and_request_scope(self):
+        for payload in (
+            {"token": "test-bearer-token"},
+            {"access_token": "test-bearer-token"},
+            {"token": "test-bearer-token", "access_token": "test-bearer-token"},
+        ):
+            with self.subTest(payload=payload):
+                transport = QueueTransport(token_response(payload))
+                self.assertEqual(
+                    updater.request_pull_token("ubuntu", transport=transport),
+                    "test-bearer-token",
+                )
+                self.assertIn("repository%3Alibrary%2Fubuntu%3Apull", transport.calls[0][0])
+
+    def test_conflicting_token_fields_are_an_error_without_token_leak(self):
+        with self.assertRaises(updater.UpdateError) as raised:
+            updater.request_pull_token(
+                "ubuntu",
+                transport=QueueTransport(
+                    token_response({"token": "first-secret", "access_token": "second-secret"})
+                ),
+            )
+        self.assertNotIn("first-secret", str(raised.exception))
+        self.assertNotIn("second-secret", str(raised.exception))
 
     def test_missing_or_malformed_token_is_an_error_without_token_leak(self):
-        for payload in (None, {}, {"token": "with whitespace"}):
+        for payload in (
+            None,
+            {},
+            {"token": "with whitespace"},
+            {"access_token": "with whitespace"},
+            {"token": None, "access_token": "valid"},
+        ):
             response = (
                 updater.HTTPResponse(200, {"Content-Type": "application/json"}, b"not json")
                 if payload is None

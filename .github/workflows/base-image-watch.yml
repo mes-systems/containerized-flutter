@@ -122,6 +122,33 @@ jobs:
             printf 'Base image watcher did not produce a summary.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Reconcile obsolete watcher pull request
+        if: >-
+          always() &&
+          (steps.update.outputs.status == 'unchanged' ||
+          steps.update.outputs.status == 'security_anomaly')
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="$(gh pr list \
+            --state open \
+            --base main \
+            --head "$WATCHER_BRANCH" \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [[ -z "$pr_number" ]]; then
+            exit 0
+          fi
+          if [[ "${{ steps.update.outputs.status }}" == "security_anomaly" ]]; then
+            comment='Base image watcher closed this PR because it detected a manifest integrity anomaly. The proposed digest is no longer considered safe; see the watcher summary and anomaly issue.'
+          else
+            comment='Base image watcher closed this PR because the upstream tag now matches the digest on main. The proposed update is obsolete.'
+          fi
+          gh pr comment "$pr_number" --body "$comment"
+          gh pr close "$pr_number"
+
       - name: Run base updater unit tests
         if: steps.update.outputs.status == 'update'
         shell: bash
@@ -148,6 +175,11 @@ jobs:
           set -euo pipefail
           git config user.name "${APP_SLUG}[bot]"
           git config user.email "${BOT_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          if git show-ref --verify --quiet "refs/remotes/origin/$WATCHER_BRANCH" \
+            && git diff --quiet "refs/remotes/origin/$WATCHER_BRANCH" --; then
+            printf 'watcher branch already matches current main and generated files\n'
+            exit 0
+          fi
           git add supported_bases.json README.md
           git diff --cached --check
           git commit -m "$PR_TITLE"

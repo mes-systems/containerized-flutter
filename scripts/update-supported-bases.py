@@ -186,10 +186,30 @@ def request_pull_token(
         payload = json.loads(response.body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise UpdateError("Docker Hub token response was malformed JSON") from error
-    token = payload.get("token") if isinstance(payload, dict) else None
-    if not isinstance(token, str) or not token or any(char.isspace() for char in token):
+    if not isinstance(payload, dict):
         raise UpdateError("Docker Hub token response did not contain a valid token")
-    return token
+
+    token_present = "token" in payload
+    access_token_present = "access_token" in payload
+    token = payload.get("token")
+    access_token = payload.get("access_token")
+    for name, value, present in (
+        ("token", token, token_present),
+        ("access_token", access_token, access_token_present),
+    ):
+        if present and (
+            not isinstance(value, str)
+            or not value
+            or any(char.isspace() for char in value)
+        ):
+            raise UpdateError(f"Docker Hub token response contained an invalid {name}")
+    if token_present and access_token_present and token != access_token:
+        raise UpdateError("Docker Hub token response contained conflicting token fields")
+    if token_present:
+        return token
+    if access_token_present:
+        return access_token
+    raise UpdateError("Docker Hub token response did not contain a valid token")
 
 
 def fetch_manifest(
