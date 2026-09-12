@@ -48,7 +48,7 @@ The current support list contains Ubuntu 24.04 and Debian 13.
 | Base ID | Family | Version | Variant | Digest |
 | --- | --- | --- | --- | --- |
 | `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:224a1869083a...` |
-| `debian13` | debian | 13 | default | `sha256:d07d1b51c39f...` |
+| `debian13` | debian | 13 | default | `sha256:f324c7ff5432...` |
 <!-- END GENERATED SUPPORTED BASES -->
 
 Debian 13 default is supported; Debian 13 Slim remains planned work.
