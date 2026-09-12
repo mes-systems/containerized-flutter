@@ -161,7 +161,8 @@ plan() {
       fi
       "$SCRIPT_DIR/validate-supported-versions.sh" "$old_flutter_manifest" >/dev/null \
         || fail 'previous supported version manifest is invalid'
-      "$SCRIPT_DIR/validate-supported-bases.sh" "$old_base_manifest" >/dev/null \
+      "$SCRIPT_DIR/validate-supported-bases.sh" --allow-multiple \
+        "$old_base_manifest" >/dev/null \
         || fail 'previous supported base manifest is invalid'
       if ! matrix="$("$SCRIPT_DIR/publish-matrix.sh" \
         "$old_flutter_manifest" "$flutter_manifest" \

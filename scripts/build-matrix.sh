@@ -20,7 +20,7 @@ fail() {
 "$SCRIPT_DIR/validate-supported-versions.sh" "$versions" >/dev/null \
   || fail "invalid Flutter manifest: $versions"
 # Structural mode lets direct tests exercise future multi-base fixtures. CI and
-# publication validate their production manifest in strict PR A mode first.
+# publication validate their production manifest in strict production mode first.
 "$SCRIPT_DIR/validate-supported-bases.sh" --allow-multiple "$bases" >/dev/null \
   || fail "invalid base manifest: $bases"
 
