@@ -203,12 +203,12 @@ proposing digest changes through a normal pull request. Base changes are never
 merged automatically; merging a base digest update selectively republishes
 every supported Flutter version for that base.
 
-The base watcher requires a repository Environment named
-`base-image-watcher`. Configure it for the `main` branch/ref with no required
-reviewer and add only:
+The base watcher uses the existing repository Environment named
+`flutter-release-watcher`. Configure it for the `main` branch/ref with no
+required reviewer and add only:
 
-- Environment variable: `BASE_WATCHER_CLIENT_ID`
-- Environment secret: `BASE_WATCHER_PRIVATE_KEY`
+- Environment variable: `FLUTTER_WATCHER_CLIENT_ID`
+- Environment secret: `FLUTTER_WATCHER_PRIVATE_KEY`
 
 ## CI and maintenance
 

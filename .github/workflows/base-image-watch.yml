@@ -21,7 +21,7 @@ jobs:
   watch:
     runs-on: ubuntu-24.04
     environment:
-      name: base-image-watcher
+      name: flutter-release-watcher
       deployment: false
     steps:
       - name: Check out current main
@@ -39,8 +39,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ vars.BASE_WATCHER_CLIENT_ID }}
-          private-key: ${{ secrets.BASE_WATCHER_PRIVATE_KEY }}
+          client-id: ${{ vars.FLUTTER_WATCHER_CLIENT_ID }}
+          private-key: ${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: containerized-flutter
           permission-contents: write
