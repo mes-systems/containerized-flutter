@@ -37,9 +37,19 @@ Cryptographic SLSA/DSSE validation is therefore deliberately deferred; it is
 not emulated or implied by this release. Future hardening belongs between
 acquisition and the pinned SHA256 check.
 
-The published container has a separate output trust boundary: the tested
-image is pushed to GHCR and receives a GitHub Artifact Attestation bound to its
-exact OCI digest.
+The published container has two complementary output trust boundaries:
+
+BuildKit provenance:
+describes how the OCI image was built. The workflows use this contract:
+
+- SLSA provenance format: v1
+- BuildKit provenance mode: max
+- SBOM format: SPDX
+
+GitHub Artifact Attestation:
+authenticates that the exact published digest came from the trusted mes-systems/containerized-flutter GitHub workflow. It is created only after
+the local build, local attestation checks, smoke test, build-qualified push,
+and remote provenance/SBOM verification succeed.
 
 ## Base image trust
 
@@ -115,7 +125,7 @@ repository Git SHA:
 
 The first tag identifies the Flutter and base inputs. The second also
 identifies the source revision used for the container build. Neither tag is a
-substitute for the final immutable identity. For strict reproducibility, pin
+substitute for the final immutable identity. For strict artifact identity, pin
 the exact OCI digest:
 
 ```
@@ -123,6 +133,13 @@ docker pull ghcr.io/mes-systems/containerized-flutter@sha256:<oci-digest>
 ```
 
 No latest, stable, or bare Flutter-version alias is published.
+Strict consumers should continue to pin the exact OCI digest.
+
+Embedded provenance and SBOM descriptors are part of the top-level OCI index,
+so independent rebuilds can produce different top-level OCI digests even when
+their platform image is equivalent. This is expected: the reproducibility
+contract is exact published artifact => exact OCI digest, not guaranteed
+identical OCI index bytes for independent rebuilds.
 
 ## Verification
 
@@ -144,7 +161,22 @@ absence or contents do not affect release acceptance. A changed archive,
 release-manifest mismatch, revision mismatch, or Flutter tag mismatch fails
 closed.
 
-To verify provenance for a published image:
+BuildKit provenance and the SPDX SBOM for a published image can be inspected
+by exact OCI digest:
+
+```
+docker buildx imagetools inspect \
+  ghcr.io/mes-systems/containerized-flutter@sha256:<digest> \
+  --format '{{json .Provenance.SLSA}}' | jq .
+```
+
+```
+docker buildx imagetools inspect \
+  ghcr.io/mes-systems/containerized-flutter@sha256:<digest> \
+  --format '{{json .SBOM.SPDX}}' | jq .
+```
+
+To verify the GitHub Artifact Attestation for the same published digest:
 
 ```
 gh attestation verify \

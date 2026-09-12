@@ -98,10 +98,28 @@ jobs:
             "${{ matrix.base_id }}" \
             supported_bases.json
 
+      - name: Set up Docker with containerd image store
+        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5
+        with:
+          version: v29.8.0
+          daemon-config: |
+            {
+              "features": {
+                "containerd-snapshotter": true
+              }
+            }
+
+      - name: Verify containerd image store
+        run: |
+          set -euo pipefail
+          docker info --format '{{json .DriverStatus}}' \
+            | grep -F 'io.containerd.snapshotter.v1'
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build image
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -109,7 +127,8 @@ jobs:
           platforms: linux/amd64
           load: true
           push: false
-          provenance: false
+          provenance: mode=max,version=v1
+          sbom: true
           tags: ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }}
           cache-from: type=gha,scope=flutter-${{ matrix.version }}-${{ matrix.base_id }}
           cache-to: type=gha,mode=max,scope=flutter-${{ matrix.version }}-${{ matrix.base_id }}
@@ -120,6 +139,27 @@ jobs:
             FLUTTER_REVISION=${{ matrix.revision }}
             FLUTTER_ARCHIVE_SHA256=${{ steps.verify.outputs.archive_sha256 }}
             SOURCE_REVISION=${{ github.sha }}
+
+      - name: Verify local build attestations
+        env:
+          BUILD_METADATA: ${{ steps.build.outputs.metadata }}
+        run: |
+          set -euo pipefail
+
+          build_ref="$(
+            jq -er '."buildx.build.ref"' <<< "$BUILD_METADATA"
+          )"
+
+          history="$(
+            docker buildx history inspect "$build_ref" --format json
+          )"
+
+          jq -e '
+            [.Attachments[].Type] as $types
+            | ($types | index("https://slsa.dev/provenance/v1")) != null
+            and
+            ($types | index("https://spdx.dev/Document")) != null
+          ' <<< "$history" >/dev/null
 
       - name: Smoke test image
         run: |

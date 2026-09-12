@@ -114,10 +114,28 @@ jobs:
             "${{ matrix.base_id }}" \
             supported_bases.json
 
+      - name: Set up Docker with containerd image store
+        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5
+        with:
+          version: v29.8.0
+          daemon-config: |
+            {
+              "features": {
+                "containerd-snapshotter": true
+              }
+            }
+
+      - name: Verify containerd image store
+        run: |
+          set -euo pipefail
+          docker info --format '{{json .DriverStatus}}' \
+            | grep -F 'io.containerd.snapshotter.v1'
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build image locally
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -125,7 +143,8 @@ jobs:
           platforms: linux/amd64
           load: true
           push: false
-          provenance: false
+          provenance: mode=max,version=v1
+          sbom: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.tag }}
             ${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.build_tag }}
@@ -138,6 +157,27 @@ jobs:
             FLUTTER_REVISION=${{ matrix.revision }}
             FLUTTER_ARCHIVE_SHA256=${{ steps.verify.outputs.archive_sha256 }}
             SOURCE_REVISION=${{ github.sha }}
+
+      - name: Verify local build attestations
+        env:
+          BUILD_METADATA: ${{ steps.build.outputs.metadata }}
+        run: |
+          set -euo pipefail
+
+          build_ref="$(
+            jq -er '."buildx.build.ref"' <<< "$BUILD_METADATA"
+          )"
+
+          history="$(
+            docker buildx history inspect "$build_ref" --format json
+          )"
+
+          jq -e '
+            [.Attachments[].Type] as $types
+            | ($types | index("https://slsa.dev/provenance/v1")) != null
+            and
+            ($types | index("https://spdx.dev/Document")) != null
+          ' <<< "$history" >/dev/null
 
       - name: Smoke test image
         run: |
@@ -163,23 +203,64 @@ jobs:
           BUILD_TAG: ${{ steps.metadata.outputs.build_tag }}
         run: |
           set -euo pipefail
-          image_digest() {
-            local reference="$1"
-            docker image inspect \
-              --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-              "$reference" \
-              | awk -F@ '$2 ~ /^sha256:[0-9a-f]{64}$/ { print $2; exit }'
-          }
+          docker push "$IMAGE_NAME:$BUILD_TAG"
+          registry_digest="$(
+            docker buildx imagetools inspect \
+              "$IMAGE_NAME:$BUILD_TAG" \
+              --format '{{.Manifest.Digest}}'
+          )"
+          [[ "$registry_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          expected_digest='${{ steps.build.outputs.digest }}'
+          [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$registry_digest" == "$expected_digest" ]]
+
+          provenance="$(
+            docker buildx imagetools inspect \
+              "$IMAGE_NAME:$BUILD_TAG" \
+              --format '{{json .Provenance.SLSA}}'
+          )"
+          jq -e '
+            type == "object"
+            and (.buildDefinition | type == "object")
+            and (.runDetails | type == "object")
+            and (
+              .buildDefinition.buildType
+              == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
+            )
+            and (
+              .buildDefinition.resolvedDependencies
+              | type == "array" and length > 0
+            )
+            and (
+              .buildDefinition.internalParameters.buildConfig.llbDefinition
+              | type == "array" and length > 0
+            )
+            and (
+              .runDetails.metadata.buildkit_completeness.request == true
+            )
+          ' <<< "$provenance" >/dev/null
+
+          sbom="$(
+            docker buildx imagetools inspect \
+              "$IMAGE_NAME:$BUILD_TAG" \
+              --format '{{json .SBOM.SPDX}}'
+          )"
+          jq -e '
+            type == "object"
+            and .SPDXID == "SPDXRef-DOCUMENT"
+            and (.spdxVersion | type == "string")
+          ' <<< "$sbom" >/dev/null
 
           docker push "$IMAGE_NAME:$CANONICAL_TAG"
-          digest="$(image_digest "$IMAGE_NAME:$CANONICAL_TAG")"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          canonical_digest="$(
+            docker buildx imagetools inspect \
+              "$IMAGE_NAME:$CANONICAL_TAG" \
+              --format '{{.Manifest.Digest}}'
+          )"
+          [[ "$canonical_digest" == "$registry_digest" ]]
 
-          docker push "$IMAGE_NAME:$BUILD_TAG"
-          build_digest="$(image_digest "$IMAGE_NAME:$BUILD_TAG")"
-          [[ "$build_digest" == "$digest" ]]
-
-          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$registry_digest" >> "$GITHUB_OUTPUT"
 
       - name: Attest published image
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
