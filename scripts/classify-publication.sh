@@ -25,19 +25,25 @@ fail() {
   exit 1
 }
 
-# ponytail: this explicit policy is intentionally reviewable. Any new
-# build-context, base-resolution, or public-tag input must be classified here
-# and covered by a regression test in the same PR.
+# Publication scope is intentionally separate from CI validation scope:
+# - full = changes image bytes, public identity, tags, or metadata
+# - selective = changes the approved Flutter/base support set
+# - none = control plane, validation, or maintenance; it does not mutate the
+#   registry by itself and does not widen manifest-scoped publication
 classify_path() {
   case "$1" in
-    Dockerfile|.dockerignore|scripts/image-metadata.sh|scripts/build-matrix.sh|\
-    scripts/validate-dockerfile.sh|scripts/validate-supported-bases.sh|\
-    scripts/publish-matrix.sh|\
-    scripts/classify-publication.sh)
+    Dockerfile|.dockerignore|scripts/image-metadata.sh)
       printf 'full\n'
       ;;
     supported_version.json|supported_bases.json)
       printf 'selective\n'
+      ;;
+    scripts/build-matrix.sh|\
+    scripts/validate-dockerfile.sh|\
+    scripts/validate-supported-bases.sh|\
+    scripts/publish-matrix.sh|\
+    scripts/classify-publication.sh)
+      printf 'none\n'
       ;;
     *)
       printf 'none\n'
