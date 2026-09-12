@@ -60,6 +60,7 @@ jobs:
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   build:
+    name: build (${{ matrix.version }}, ${{ matrix.base_id }})
     needs: manifest
     if: needs.manifest.outputs.requires_toolchain_ci == 'true'
     runs-on: ubuntu-24.04
