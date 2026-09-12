@@ -105,6 +105,12 @@ assert_classification true README.md tests/smoke_app/test/smoke_test.dart
 assert_classification true some-new-future-file
 assert_classification true
 assert_classification true --revisions not-a-base not-a-head
+assert_classification true \
+  README.md \
+  scripts/validate-supported-bases.sh \
+  supported_bases.json \
+  tests/scripts_test.sh \
+  tests/test_update_supported_bases.py
 
 assert_publication_mode none README.md
 assert_publication_mode none .github/workflows/flutter-release-watch.yml
@@ -124,15 +130,35 @@ assert_publication_mode selective supported_version.json
 assert_publication_mode selective supported_bases.json
 assert_publication_mode selective supported_version.json README.md \
   .github/workflows/flutter-release-watch.yml
+assert_publication_mode selective \
+  supported_bases.json \
+  scripts/validate-supported-bases.sh
+assert_publication_mode selective \
+  supported_version.json \
+  scripts/build-matrix.sh
+assert_publication_mode selective \
+  README.md \
+  scripts/validate-supported-bases.sh \
+  supported_bases.json \
+  tests/scripts_test.sh \
+  tests/test_update_supported_bases.py
 assert_publication_mode full Dockerfile
 assert_publication_mode full .dockerignore
 assert_publication_mode full scripts/image-metadata.sh
-assert_publication_mode full scripts/build-matrix.sh
-assert_publication_mode full scripts/validate-dockerfile.sh
-assert_publication_mode full scripts/validate-supported-bases.sh
-assert_publication_mode full scripts/publish-matrix.sh
-assert_publication_mode full scripts/classify-publication.sh
+assert_publication_mode none scripts/build-matrix.sh
+assert_publication_mode none scripts/validate-dockerfile.sh
+assert_publication_mode none scripts/validate-supported-bases.sh
+assert_publication_mode none scripts/publish-matrix.sh
+assert_publication_mode none scripts/classify-publication.sh
 assert_publication_mode full Dockerfile supported_version.json
+assert_publication_mode full \
+  scripts/image-metadata.sh \
+  supported_version.json \
+  scripts/publish-matrix.sh
+assert_publication_mode full \
+  Dockerfile \
+  supported_bases.json \
+  scripts/validate-supported-bases.sh
 dispatch_mode="$("$publication_classifier" --workflow-dispatch "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$dispatch_mode"
 dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_mode")"
@@ -267,29 +293,35 @@ fixture_toolchain_result="$(cd "$fixture_repo" && "$classifier" --revisions \
 [[ "$fixture_toolchain_result" == 'requires_toolchain_ci=true' ]] \
   || fail "expected toolchain revision range to require CI, got: $fixture_toolchain_result"
 
-fixture_dockerfile_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
-  "$fixture_docs_head" "$fixture_toolchain_head")"
-[[ "$fixture_dockerfile_publish" == 'publish_mode=full' ]] \
-  || fail "Dockerfile revision range was not full publication: $fixture_dockerfile_publish"
+fixture_dockerfile_plan="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_docs_head" "$fixture_toolchain_head" "$manifest" "$base_manifest")"
+assert_contains 'publish_mode=full' "$fixture_dockerfile_plan"
+fixture_dockerfile_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_dockerfile_plan")"
+[[ "$(jq -er '.include | length' <<< "$fixture_dockerfile_matrix")" == 9 ]] \
+  || fail 'Dockerfile revision range did not plan the full matrix'
 
 printf 'Dockerfile exclusions\n' > "$fixture_repo/.dockerignore"
 git -C "$fixture_repo" add .dockerignore
 git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add Docker ignore file'
 fixture_dockerignore_head="$(git -C "$fixture_repo" rev-parse HEAD)"
-fixture_dockerignore_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
-  "$fixture_toolchain_head" "$fixture_dockerignore_head")"
-[[ "$fixture_dockerignore_publish" == 'publish_mode=full' ]] \
-  || fail ".dockerignore revision range was not full publication: $fixture_dockerignore_publish"
+fixture_dockerignore_plan="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_toolchain_head" "$fixture_dockerignore_head" "$manifest" "$base_manifest")"
+assert_contains 'publish_mode=full' "$fixture_dockerignore_plan"
+fixture_dockerignore_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_dockerignore_plan")"
+[[ "$(jq -er '.include | length' <<< "$fixture_dockerignore_matrix")" == 9 ]] \
+  || fail '.dockerignore revision range did not plan the full matrix'
 
 mkdir -p "$fixture_repo/scripts"
 printf '#!/usr/bin/env bash\n' > "$fixture_repo/scripts/image-metadata.sh"
 git -C "$fixture_repo" add scripts/image-metadata.sh
 git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add image metadata script'
 fixture_metadata_head="$(git -C "$fixture_repo" rev-parse HEAD)"
-fixture_metadata_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
-  "$fixture_dockerignore_head" "$fixture_metadata_head")"
-[[ "$fixture_metadata_publish" == 'publish_mode=full' ]] \
-  || fail "image metadata revision range was not full publication: $fixture_metadata_publish"
+fixture_metadata_plan="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
+  "$fixture_dockerignore_head" "$fixture_metadata_head" "$manifest" "$base_manifest")"
+assert_contains 'publish_mode=full' "$fixture_metadata_plan"
+fixture_metadata_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_metadata_plan")"
+[[ "$(jq -er '.include | length' <<< "$fixture_metadata_matrix")" == 9 ]] \
+  || fail 'image metadata revision range did not plan the full matrix'
 
 mkdir -p "$fixture_repo/.github/workflows" "$fixture_repo/scripts" "$fixture_repo/tests"
 for maintenance_path in \
@@ -331,13 +363,21 @@ migration_repo="$test_dir/base-migration-repo"
 git init -q "$migration_repo"
 git -C "$migration_repo" config user.name base-migration-test
 git -C "$migration_repo" config user.email base-migration-test@example.invalid
+mkdir -p "$migration_repo/scripts"
 cp "$publish_base" "$migration_repo/supported_version.json"
 cp "$two_base_bases" "$migration_repo/supported_bases.json"
-git -C "$migration_repo" add supported_version.json supported_bases.json
+printf 'two-base validation policy\n' > "$migration_repo/scripts/validate-supported-bases.sh"
+git -C "$migration_repo" add \
+  supported_version.json \
+  supported_bases.json \
+  scripts/validate-supported-bases.sh
 git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: historical two-base manifest'
 migration_base="$(git -C "$migration_repo" rev-parse HEAD)"
 cp "$base_manifest" "$migration_repo/supported_bases.json"
-git -C "$migration_repo" add supported_bases.json
+printf 'three-base validation policy\n' > "$migration_repo/scripts/validate-supported-bases.sh"
+git -C "$migration_repo" add \
+  supported_bases.json \
+  scripts/validate-supported-bases.sh
 git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: add Debian base'
 migration_head="$(git -C "$migration_repo" rev-parse HEAD)"
 migration_plan="$(cd "$migration_repo" && "$publication_classifier" --revisions \
@@ -351,6 +391,42 @@ jq -e '
   (all(.include[]; .base_id == "debian13-slim"))
 ' <<< "$migration_matrix" >/dev/null \
   || fail 'two-base to three-base migration did not plan Debian Slim rows'
+migration_ci="$(cd "$migration_repo" && "$classifier" --revisions \
+  "$migration_base" "$migration_head")"
+[[ "$migration_ci" == 'requires_toolchain_ci=true' ]] \
+  || fail "manifest plus validator migration did not require full CI: $migration_ci"
+
+control_plane_repo="$test_dir/control-plane-repo"
+git init -q "$control_plane_repo"
+git -C "$control_plane_repo" config user.name control-plane-test
+git -C "$control_plane_repo" config user.email control-plane-test@example.invalid
+mkdir -p "$control_plane_repo/scripts" "$control_plane_repo/tests"
+cp "$publish_base" "$control_plane_repo/supported_version.json"
+cp "$publish_base_bases" "$control_plane_repo/supported_bases.json"
+printf 'README baseline\n' > "$control_plane_repo/README.md"
+printf 'classifier baseline\n' > "$control_plane_repo/scripts/classify-publication.sh"
+printf 'test baseline\n' > "$control_plane_repo/tests/scripts_test.sh"
+git -C "$control_plane_repo" add .
+git -C "$control_plane_repo" -c commit.gpgsign=false commit -qm 'fixture: initial control-plane files'
+control_plane_base="$(git -C "$control_plane_repo" rev-parse HEAD)"
+printf 'README update\n' > "$control_plane_repo/README.md"
+printf 'classifier update\n' > "$control_plane_repo/scripts/classify-publication.sh"
+printf 'test update\n' > "$control_plane_repo/tests/scripts_test.sh"
+git -C "$control_plane_repo" add README.md scripts/classify-publication.sh tests/scripts_test.sh
+git -C "$control_plane_repo" -c commit.gpgsign=false commit -qm 'fixture: control-plane-only change'
+control_plane_head="$(git -C "$control_plane_repo" rev-parse HEAD)"
+control_plane_ci="$(cd "$control_plane_repo" && "$classifier" --revisions \
+  "$control_plane_base" "$control_plane_head")"
+[[ "$control_plane_ci" == 'requires_toolchain_ci=true' ]] \
+  || fail "control-plane-only revision range did not require full CI: $control_plane_ci"
+control_plane_plan="$(cd "$control_plane_repo" && "$publication_classifier" --revisions \
+  "$control_plane_base" "$control_plane_head" supported_version.json supported_bases.json)"
+assert_contains 'publish_mode=none' "$control_plane_plan"
+assert_contains 'publish_matrix={"include":[]}' "$control_plane_plan"
+assert_contains 'publish_needed=false' "$control_plane_plan"
+control_plane_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$control_plane_plan")"
+[[ "$(jq -er '.include | length' <<< "$control_plane_matrix")" == 0 ]] \
+  || fail 'control-plane-only change attempted publication'
 
 publication_repo="$test_dir/publication-repo"
 git init -q "$publication_repo"

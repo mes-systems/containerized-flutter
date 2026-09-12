@@ -214,15 +214,24 @@ required reviewer and add only:
 
 ## CI and maintenance
 
-Documentation-only changes run the lightweight manifest and script validation
-but do not rebuild the supported Flutter matrix. The shared change classifier
-allows this only when every changed path is explicitly harmless; any unknown or
-toolchain-relevant path defaults to full validation. Manual workflow dispatch
-can force the full matrix, and a main-branch publication follows the same
-classification before pushing or attesting images. A supported-version change
-publishes changed Flutter releases across all current bases; a supported-base
-digest change publishes all current Flutter releases for that base. Dockerfile,
-build-matrix, metadata, and packaging changes rebuild the full active matrix.
+PR CI and registry publication intentionally use different scopes. CI fails
+safe: any unknown or toolchain-relevant change runs the full supported
+Flutter/base validation matrix.
+
+Automatic main-branch publication is narrower:
+
+- Dockerfile, `.dockerignore`, and image metadata changes rebuild the full
+  active matrix;
+- supported-version and supported-base manifest changes use the selective
+  publication planner;
+- validation, matrix-planning, publication-planning, workflow, documentation,
+  and test changes do not widen publication scope by themselves.
+
+A control-plane change combined with a manifest update therefore keeps the
+manifest's selective scope. Manual workflow dispatch explicitly forces the
+full publication matrix. A supported-version change publishes changed Flutter
+releases across all current bases; a supported-base digest change publishes
+all current Flutter releases for that base.
 Retired GHCR artifacts are not deleted. Watcher PRs still pass through this
 ordinary full-matrix CI gate; the watcher does not bypass release verification
 or image tests.
