@@ -137,8 +137,11 @@ class ReferenceAndHTTPTest(unittest.TestCase):
         self.assertEqual(debian.normalized_repository, "library/debian")
         self.assertEqual(debian.tag, "13")
 
-        slim = updater.parse_base_reference("debian:trixie-slim@sha256:" + "c" * 64)
-        self.assertEqual(slim.tag_reference, "debian:trixie-slim")
+        slim = updater.parse_base_reference("debian:13-slim@sha256:" + "c" * 64)
+        self.assertEqual(slim.repository, "debian")
+        self.assertEqual(slim.tag, "13-slim")
+        self.assertEqual(slim.tag_reference, "debian:13-slim")
+        self.assertEqual(slim.normalized_repository, "library/debian")
 
     def test_docker_hub_library_normalization(self):
         self.assertEqual(updater.normalize_docker_hub_repository("ubuntu"), "library/ubuntu")
@@ -311,8 +314,17 @@ class UpdateCalculationTest(unittest.TestCase):
         self.old_debian = base_entry(
             base_id="debian13", family="debian", version="13", tag="13", marker="2"
         )
+        self.old_slim = base_entry(
+            base_id="debian13-slim",
+            family="debian",
+            version="13",
+            tag="13-slim",
+            marker="3",
+        )
+        self.old_slim["variant"] = "slim"
         self.ubuntu_new = "sha256:" + "a" * 64
         self.debian_new = "sha256:" + "b" * 64
+        self.slim_new = "sha256:" + "c" * 64
 
     def test_same_digest_is_unchanged(self):
         summary = updater.calculate_updates(
@@ -359,6 +371,45 @@ class UpdateCalculationTest(unittest.TestCase):
             resolver=resolver_for(**{"ubuntu:24.04": self.ubuntu_new, "debian:13": self.debian_new}),
         )
         self.assertEqual([change["base_id"] for change in summary["changes"]], ["ubuntu24.04", "debian13"])
+
+    def test_only_slim_digest_change_updates_slim_and_renders_one_change(self):
+        manifest = base_manifest(self.old_ubuntu, self.old_debian, self.old_slim)
+        case_dir = Path(tempfile.mkdtemp(prefix="base-updater-slim-test-"))
+        self.addCleanup(shutil.rmtree, case_dir)
+        manifest_path = case_dir / "supported_bases.json"
+        readme_path = case_dir / "README.md"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        readme_path.write_text(updater.render_supported_bases(manifest), encoding="utf-8")
+        args = SimpleNamespace(manifest=str(manifest_path), readme=str(readme_path), write=True, check=False)
+
+        summary, markdown = updater.run(
+            args,
+            resolver=resolver_for(
+                **{
+                    "ubuntu:24.04": self.old_ubuntu["reference"].split("@", 1)[1],
+                    "debian:13": self.old_debian["reference"].split("@", 1)[1],
+                    "debian:13-slim": self.slim_new,
+                }
+            ),
+        )
+        self.assertEqual(summary["status"], "update")
+        self.assertEqual([change["base_id"] for change in summary["changes"]], ["debian13-slim"])
+        self.assertIn("| debian13-slim | debian:13-slim |", markdown)
+        self.assertNotIn("| ubuntu24.04 |", markdown)
+        self.assertNotIn("| debian13 |", markdown)
+
+        updated = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(updated["bases"][0]["reference"], self.old_ubuntu["reference"])
+        self.assertEqual(updated["bases"][1]["reference"], self.old_debian["reference"])
+        self.assertEqual(updated["bases"][2]["variant"], "slim")
+        self.assertEqual(
+            updated["bases"][2]["reference"],
+            "debian:13-slim@" + self.slim_new,
+        )
+        self.assertIn(
+            "| " + chr(96) + "debian13-slim" + chr(96) + " | debian | 13 | slim |",
+            readme_path.read_text(encoding="utf-8"),
+        )
 
     def test_error_and_security_anomaly_do_not_produce_updates(self):
         manifest = base_manifest(self.old_ubuntu, self.old_debian)
@@ -451,6 +502,14 @@ class ReadmeAndSummaryTest(unittest.TestCase):
         self.debian = base_entry(
             base_id="debian13", family="debian", version="13", tag="13", marker="2"
         )
+        self.slim = base_entry(
+            base_id="debian13-slim",
+            family="debian",
+            version="13",
+            tag="13-slim",
+            marker="3",
+        )
+        self.slim["variant"] = "slim"
 
     def test_repository_readme_block_matches_current_manifest(self):
         manifest = json.loads(BASE_MANIFEST.read_text(encoding="utf-8"))
@@ -469,8 +528,10 @@ class ReadmeAndSummaryTest(unittest.TestCase):
     def test_new_and_removed_synthetic_bases_and_short_digest_render(self):
         one = updater.render_supported_bases([self.ubuntu])
         two = updater.render_supported_bases([self.ubuntu, self.debian])
+        three = updater.render_supported_bases([self.ubuntu, self.debian, self.slim])
         self.assertNotIn("debian13", one)
         self.assertIn("`debian13`", two)
+        self.assertIn("| `debian13-slim` | debian | 13 | slim |", three)
         self.assertIn("`sha256:" + "1" * 12 + "...`", one)
         changed = dict(self.ubuntu, reference="ubuntu:24.04@sha256:" + "f" * 64)
         self.assertIn("`sha256:" + "f" * 12 + "...`", updater.render_supported_bases([changed]))

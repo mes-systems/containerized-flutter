@@ -61,16 +61,19 @@ python3 "$ROOT_DIR/tests/test_update_supported_versions.py"
 python3 "$ROOT_DIR/tests/test_update_supported_bases.py"
 "$dockerfile_guard" "$ROOT_DIR/Dockerfile"
 current_matrix="$("$build_matrix_script" "$manifest" "$base_manifest")"
-[[ "$(jq -er '.include | length' <<< "$current_matrix")" == 6 ]] \
-  || fail 'current build matrix must contain six Flutter/base rows'
+[[ "$(jq -er '.include | length' <<< "$current_matrix")" == 9 ]] \
+  || fail 'current build matrix must contain nine Flutter/base rows'
 jq -e '
   [.include[] | [.version, .base_id]]
   == [["3.41.9", "ubuntu24.04"],
       ["3.41.9", "debian13"],
+      ["3.41.9", "debian13-slim"],
       ["3.44.9", "ubuntu24.04"],
       ["3.44.9", "debian13"],
+      ["3.44.9", "debian13-slim"],
       ["3.47.3", "ubuntu24.04"],
-      ["3.47.3", "debian13"]]
+      ["3.47.3", "debian13"],
+      ["3.47.3", "debian13-slim"]]
 ' <<< "$current_matrix" >/dev/null \
   || fail 'current build matrix has unexpected Flutter/base pairs'
 
@@ -133,7 +136,7 @@ assert_publication_mode full Dockerfile supported_version.json
 dispatch_mode="$("$publication_classifier" --workflow-dispatch "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$dispatch_mode"
 dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_mode")"
-[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 6 ]] \
+[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 9 ]] \
   || fail 'workflow_dispatch did not plan every supported Flutter/base row'
 assert_fails "$publication_classifier" --revisions not-a-base not-a-head
 
@@ -178,24 +181,34 @@ jq '.bases = [.bases[1]]' "$base_manifest" > "$debian_only_bases"
 assert_fails "$base_validator" "$debian_only_bases"
 "$base_validator" --allow-multiple "$debian_only_bases"
 
+two_base_bases="$test_dir/supported_bases-two-production.json"
+jq '.bases = .bases[0:2]' "$base_manifest" > "$two_base_bases"
+assert_fails "$base_validator" "$two_base_bases"
+"$base_validator" --allow-multiple "$two_base_bases"
+
 debian_slim_bases="$test_dir/supported_bases-debian-slim.json"
-jq '.bases[1].id = "debian13-slim" | .bases[1].variant = "slim"' \
+jq '.bases = [.bases[2]]' \
   "$base_manifest" > "$debian_slim_bases"
 assert_fails "$base_validator" "$debian_slim_bases"
 
 third_base_bases="$test_dir/supported_bases-three.json"
 jq '.bases += [{
-  "id": "debian13-slim",
+  "id": "debian13-extra",
   "family": "debian",
   "version": "13",
-  "variant": "slim",
+  "variant": "default",
   "reference": "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }]' "$base_manifest" > "$third_base_bases"
 assert_fails "$base_validator" "$third_base_bases"
 
-duplicate_debian_bases="$test_dir/supported_bases-duplicate-debian.json"
-jq '.bases += [.bases[1]]' "$base_manifest" > "$duplicate_debian_bases"
-assert_fails "$base_validator" "$duplicate_debian_bases"
+wrong_order_bases="$test_dir/supported_bases-wrong-order.json"
+jq '.bases = [.bases[1], .bases[0], .bases[2]]' "$base_manifest" > "$wrong_order_bases"
+assert_fails "$base_validator" "$wrong_order_bases"
+"$base_validator" --allow-multiple "$wrong_order_bases"
+
+duplicate_debian_slim_bases="$test_dir/supported_bases-duplicate-debian-slim.json"
+jq '.bases[1] = .bases[2]' "$base_manifest" > "$duplicate_debian_slim_bases"
+assert_fails "$base_validator" "$duplicate_debian_slim_bases"
 
 for filter in \
   '.bases[1].family = "ubuntu"' \
@@ -207,10 +220,20 @@ do
   assert_fails "$base_validator" "$test_dir/invalid-debian-bases.json"
 done
 
+for filter in \
+  '.bases[2].variant = "default"' \
+  '.bases[2].reference = "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+  '.bases[2].family = "ubuntu"' \
+  '.bases[2].version = "12"'
+do
+  jq "$filter" "$base_manifest" > "$test_dir/invalid-debian-slim-bases.json"
+  assert_fails "$base_validator" "$test_dir/invalid-debian-slim-bases.json"
+done
+
 synthetic_bases="$test_dir/supported_bases-two.json"
-jq '.bases[1].reference = "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+jq '.bases = .bases[0:2] | .bases[1].reference = "debian:13@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
   "$base_manifest" > "$synthetic_bases"
-"$base_validator" "$synthetic_bases"
+assert_fails "$base_validator" "$synthetic_bases"
 "$base_validator" --allow-multiple "$synthetic_bases"
 
 synthetic_matrix="$("$build_matrix_script" "$ROOT_DIR/tests/fixtures/supported_version.json" "$synthetic_bases")"
@@ -301,7 +324,7 @@ dispatch_plan="$("$publication_classifier" --workflow-dispatch "$publish_base" "
 assert_contains 'publish_mode=full' "$dispatch_plan"
 assert_contains 'publish_needed=true' "$dispatch_plan"
 dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_plan")"
-[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 6 ]] \
+[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 9 ]] \
   || fail 'workflow_dispatch did not plan every supported Flutter/base row'
 
 migration_repo="$test_dir/base-migration-repo"
@@ -309,9 +332,9 @@ git init -q "$migration_repo"
 git -C "$migration_repo" config user.name base-migration-test
 git -C "$migration_repo" config user.email base-migration-test@example.invalid
 cp "$publish_base" "$migration_repo/supported_version.json"
-cp "$ubuntu_only_bases" "$migration_repo/supported_bases.json"
+cp "$two_base_bases" "$migration_repo/supported_bases.json"
 git -C "$migration_repo" add supported_version.json supported_bases.json
-git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: historical one-base manifest'
+git -C "$migration_repo" -c commit.gpgsign=false commit -qm 'fixture: historical two-base manifest'
 migration_base="$(git -C "$migration_repo" rev-parse HEAD)"
 cp "$base_manifest" "$migration_repo/supported_bases.json"
 git -C "$migration_repo" add supported_bases.json
@@ -325,9 +348,9 @@ migration_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$migration_plan")"
 jq -e '
   (.include | length == 3)
   and
-  (all(.include[]; .base_id == "debian13"))
+  (all(.include[]; .base_id == "debian13-slim"))
 ' <<< "$migration_matrix" >/dev/null \
-  || fail 'one-base to two-base migration did not plan Debian rows'
+  || fail 'two-base to three-base migration did not plan Debian Slim rows'
 
 publication_repo="$test_dir/publication-repo"
 git init -q "$publication_repo"
@@ -355,8 +378,8 @@ selective_plan="$(cd "$publication_repo" && "$publication_classifier" --revision
 assert_contains 'publish_mode=selective' "$selective_plan"
 assert_contains 'publish_needed=true' "$selective_plan"
 selective_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$selective_plan")"
-[[ "$(jq -er '.include | length' <<< "$selective_matrix")" == 2 ]] \
-  || fail 'selective planner did not contain one patch replacement for both bases'
+[[ "$(jq -er '.include | length' <<< "$selective_matrix")" == 3 ]] \
+  || fail 'selective planner did not contain one patch replacement for all bases'
 [[ "$(jq -er 'all(.include[]; .version == "1.2.4")' <<< "$selective_matrix")" == true ]] \
   || fail 'selective planner omitted the replacement patch'
 
@@ -390,8 +413,8 @@ new_minor_plan="$(cd "$publication_repo" && "$publication_classifier" --revision
 assert_contains 'publish_mode=selective' "$new_minor_plan"
 assert_contains 'publish_needed=true' "$new_minor_plan"
 new_minor_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$new_minor_plan")"
-[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 2 ]] \
-  || fail 'new-minor planner did not contain one release for both bases'
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 3 ]] \
+  || fail 'new-minor planner did not contain one release for all bases'
 [[ "$(jq -er 'all(.include[]; .version == "2.1.0")' <<< "$new_minor_matrix")" == true ]] \
   || fail 'new-minor planner omitted the new release'
 
@@ -470,10 +493,13 @@ jq '
 ' "$publish_base" > "$test_dir/publish-patch.json"
 patch_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-patch.json" \
   "$publish_base_bases" "$publish_base_bases")"
-[[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 2 ]] \
-  || fail 'publish matrix did not contain one patch replacement for both bases'
+[[ "$(jq -er '.include | length' <<< "$patch_matrix")" == 3 ]] \
+  || fail 'publish matrix did not contain one patch replacement for all bases'
 [[ "$(jq -er 'all(.include[]; .version == "1.2.4")' <<< "$patch_matrix")" == true ]] \
   || fail 'publish matrix omitted the replacement patch'
+[[ "$(jq -er '[.include[].base_id] | sort == ["debian13", "debian13-slim", "ubuntu24.04"]' \
+  <<< "$patch_matrix")" == true ]] \
+  || fail 'publish matrix did not cover all three production bases'
 
 jq '.supported_versions += [{
   "version": "2.1.0",
@@ -484,8 +510,8 @@ jq '.supported_versions += [{
 }]' "$publish_base" > "$test_dir/publish-new-minor.json"
 new_minor_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-new-minor.json" \
   "$publish_base_bases" "$publish_base_bases")"
-[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 2 ]] \
-  || fail 'publish matrix did not contain one new minor for both bases'
+[[ "$(jq -er '.include | length' <<< "$new_minor_matrix")" == 3 ]] \
+  || fail 'publish matrix did not contain one new minor for all bases'
 [[ "$(jq -er 'all(.include[]; .version == "2.1.0")' <<< "$new_minor_matrix")" == true ]] \
   || fail 'publish matrix omitted the new minor'
 
@@ -525,16 +551,16 @@ changed_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" 
   || fail 'base digest change selected the wrong base'
 
 new_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" \
-  "$ubuntu_only_bases" "$synthetic_bases")"
+  "$two_base_bases" "$base_manifest")"
 jq -e '
   (.include | length == 3)
   and
-  (all(.include[]; .base_id == "debian13"))
+  (all(.include[]; .base_id == "debian13-slim"))
 ' <<< "$new_base_matrix" >/dev/null \
-  || fail 'new base should publish every current Flutter for Debian only'
+  || fail 'new Slim base should publish every current Flutter for Debian Slim only'
 
 retired_base_matrix="$("$publish_matrix_script" "$publish_base" "$publish_base" \
-  "$synthetic_bases" "$ubuntu_only_bases")"
+  "$base_manifest" "$two_base_bases")"
 [[ "$(jq -er '.include | length' <<< "$retired_base_matrix")" == 0 ]] \
   || fail 'base retirement should publish nothing'
 
@@ -626,6 +652,24 @@ assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
 assert_contains 'tag=3.47.3-debian13-f324c7ff5432' "$metadata"
 assert_contains 'build_tag=3.47.3-debian13-f324c7ff5432-gc9a6c484230f' \
   "$metadata"
+
+metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
+  c9a6c484230f8b5e408ec57be1ef71dee1e77020 debian13-slim "$base_manifest")"
+assert_contains 'flutter_version=3.47.3' "$metadata"
+assert_contains 'base_id=debian13-slim' "$metadata"
+assert_contains 'base_family=debian' "$metadata"
+assert_contains 'base_version=13' "$metadata"
+assert_contains 'base_variant=slim' "$metadata"
+assert_contains 'base_reference=debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132' \
+  "$metadata"
+assert_contains 'base_digest=sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132' \
+  "$metadata"
+assert_contains 'base_digest_short=d7e12182ce18' "$metadata"
+assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
+assert_contains 'tag=3.47.3-debian13-slim-d7e12182ce18' "$metadata"
+assert_contains 'build_tag=3.47.3-debian13-slim-d7e12182ce18-gc9a6c484230f' \
+  "$metadata"
+
 assert_fails "$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
   c9a6c484230f8b5e408ec57be1ef71dee1e77020 unknown-base "$base_manifest"
 assert_fails "$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
