@@ -149,9 +149,15 @@ jobs:
           build_ref="$(
             jq -er '."buildx.build.ref"' <<< "$BUILD_METADATA"
           )"
+          builder="${build_ref%%/*}"
+          record="${build_ref##*/}"
+          [[ -n "$builder" && -n "$record" && "$builder" != "$build_ref" ]]
 
           history="$(
-            docker buildx history inspect "$build_ref" --format json
+            docker buildx \
+              --builder "$builder" \
+              history inspect "$record" \
+              --format json
           )"
 
           jq -e '
