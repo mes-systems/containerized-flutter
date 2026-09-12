@@ -3,19 +3,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 diff_file=""
-old_manifest=""
-publication_mode=""
+old_flutter_manifest=""
+old_base_manifest=""
 
 cleanup() {
   [[ -z "$diff_file" ]] || rm -f -- "$diff_file"
-  [[ -z "$old_manifest" ]] || rm -f -- "$old_manifest"
+  [[ -z "$old_flutter_manifest" ]] || rm -f -- "$old_flutter_manifest"
+  [[ -z "$old_base_manifest" ]] || rm -f -- "$old_base_manifest"
 }
 trap cleanup EXIT
 
 usage() {
   printf 'usage: %s --paths [PATH ...]\n' "$0" >&2
-  printf '       %s --workflow-dispatch [MANIFEST]\n' "$0" >&2
-  printf '       %s --revisions BASE_SHA HEAD_SHA [MANIFEST]\n' "$0" >&2
+  printf '       %s --workflow-dispatch SUPPORTED_VERSION_JSON SUPPORTED_BASES_JSON\n' "$0" >&2
+  printf '       %s --revisions BASE_SHA HEAD_SHA SUPPORTED_VERSION_JSON SUPPORTED_BASES_JSON\n' "$0" >&2
   exit 2
 }
 
@@ -24,17 +25,18 @@ fail() {
   exit 1
 }
 
-# ponytail: this explicit policy is intentionally reviewable, but it is a
-# known ceiling. Any new Docker build-context or public tag input (for
-# example supported_bases.json, distro variants, or architecture-specific
-# files) must be added here and covered by a regression test in the same PR;
-# a prior .dockerignore change cannot discover later edits to that input.
+# ponytail: this explicit policy is intentionally reviewable. Any new
+# build-context, base-resolution, or public-tag input must be classified here
+# and covered by a regression test in the same PR.
 classify_path() {
   case "$1" in
-    Dockerfile|.dockerignore|scripts/image-metadata.sh)
+    Dockerfile|.dockerignore|scripts/image-metadata.sh|scripts/build-matrix.sh|\
+    scripts/validate-dockerfile.sh|scripts/validate-supported-bases.sh|\
+    scripts/publish-matrix.sh|\
+    scripts/classify-publication.sh)
       printf 'full\n'
       ;;
-    supported_version.json)
+    supported_version.json|supported_bases.json)
       printf 'selective\n'
       ;;
     *)
@@ -104,61 +106,80 @@ mode_for_revisions() {
   publication_mode="$(mode_for_diff "$diff_file")"
 }
 
-emit_mode() {
-  printf 'publish_mode=%s\n' "$1"
+git_path_for_manifest() {
+  local manifest="$1"
+  local repo_root
+
+  if [[ "$manifest" == /* ]]; then
+    repo_root="$(git rev-parse --show-toplevel)" \
+      || fail 'could not resolve repository root for manifest'
+    [[ "$manifest" == "$repo_root/"* ]] \
+      || fail "manifest is outside the repository: $manifest"
+    printf '%s\n' "${manifest#"$repo_root/"}"
+  else
+    printf '%s\n' "${manifest#./}"
+  fi
 }
 
 plan() {
-  local manifest="$1"
-  local mode="$2"
-  local base_sha="${3:-}"
-  local matrix
-  local publish_matrix='{"include":[]}'
+  local flutter_manifest="$1"
+  local base_manifest="$2"
+  local mode="$3"
+  local base_sha="${4:-}"
+  local matrix='{"include":[]}'
   local publish_needed=false
 
-  "$SCRIPT_DIR/validate-supported-versions.sh" "$manifest" >/dev/null \
-    || fail "current manifest is invalid: $manifest"
-  if ! matrix="$(jq -c '{include: [.supported_versions[] | {version, channel, revision, archive, archive_sha256}]}' "$manifest")"; then
-    fail "could not build the current publication matrix"
-  fi
-  if ! jq -e '.include | type == "array"' <<< "$matrix" >/dev/null; then
-    fail 'current publication matrix is malformed'
-  fi
+  "$SCRIPT_DIR/validate-supported-versions.sh" "$flutter_manifest" >/dev/null \
+    || fail "current Flutter manifest is invalid: $flutter_manifest"
+  "$SCRIPT_DIR/validate-supported-bases.sh" "$base_manifest" >/dev/null \
+    || fail "current base manifest is invalid: $base_manifest"
 
   case "$mode" in
     none)
       ;;
     full)
-      publish_matrix="$matrix"
+      if ! matrix="$("$SCRIPT_DIR/build-matrix.sh" "$flutter_manifest" "$base_manifest")"; then
+        fail 'could not build the full publication matrix'
+      fi
       publish_needed=true
       ;;
     selective)
       [[ -n "$base_sha" ]] || fail 'selective publication requires a base revision'
-      if ! old_manifest="$(mktemp "${TMPDIR:-/tmp}/publish-old-manifest.XXXXXX")"; then
-        fail 'could not create a temporary previous-manifest file'
+      if ! old_flutter_manifest="$(mktemp "${TMPDIR:-/tmp}/publish-old-flutter.XXXXXX")"; then
+        fail 'could not create a temporary previous Flutter manifest'
       fi
-      if ! git show "$base_sha:supported_version.json" > "$old_manifest"; then
+      if ! old_base_manifest="$(mktemp "${TMPDIR:-/tmp}/publish-old-bases.XXXXXX")"; then
+        fail 'could not create a temporary previous base manifest'
+      fi
+      old_flutter_path="$(git_path_for_manifest "$flutter_manifest")"
+      old_base_path="$(git_path_for_manifest "$base_manifest")"
+      if ! git show "$base_sha:$old_flutter_path" > "$old_flutter_manifest"; then
         fail "could not read previous supported version manifest at $base_sha"
       fi
-      "$SCRIPT_DIR/validate-supported-versions.sh" "$old_manifest" >/dev/null \
+      if ! git show "$base_sha:$old_base_path" > "$old_base_manifest"; then
+        fail "could not read previous supported base manifest at $base_sha"
+      fi
+      "$SCRIPT_DIR/validate-supported-versions.sh" "$old_flutter_manifest" >/dev/null \
         || fail 'previous supported version manifest is invalid'
-      if ! publish_matrix="$("$SCRIPT_DIR/publish-matrix.sh" "$old_manifest" "$manifest")"; then
+      "$SCRIPT_DIR/validate-supported-bases.sh" "$old_base_manifest" >/dev/null \
+        || fail 'previous supported base manifest is invalid'
+      if ! matrix="$("$SCRIPT_DIR/publish-matrix.sh" \
+        "$old_flutter_manifest" "$flutter_manifest" \
+        "$old_base_manifest" "$base_manifest")"; then
         fail 'could not build the selective publication matrix'
       fi
-      if ! jq -e '.include | type == "array"' <<< "$publish_matrix" >/dev/null; then
-        fail 'selective publication matrix is malformed'
-      fi
-      if ! publish_needed="$(jq -r '.include | length > 0' <<< "$publish_matrix")"; then
-        fail 'selective publication matrix has no valid length'
-      fi
+      publish_needed="$(jq -r '.include | length > 0' <<< "$matrix")" \
+        || fail 'selective publication matrix has no valid length'
       ;;
     *)
       fail "invalid publication mode: $mode"
       ;;
   esac
 
+  jq -e '.include | type == "array"' <<< "$matrix" >/dev/null \
+    || fail 'publication matrix is malformed'
   printf 'publish_mode=%s\n' "$mode"
-  printf 'publish_matrix=%s\n' "$publish_matrix"
+  printf 'publish_matrix=%s\n' "$matrix"
   printf 'publish_needed=%s\n' "$publish_needed"
 }
 
@@ -169,35 +190,22 @@ fi
 case "$1" in
   --paths)
     shift
-    emit_mode "$(mode_for_paths "$@")"
+    printf 'publish_mode=%s\n' "$(mode_for_paths "$@")"
     ;;
   --workflow-dispatch)
-    case "$#" in
-      1)
-        emit_mode full
-        ;;
-      2)
-        plan "$2" full
-        ;;
-      *)
-        usage
-        ;;
-    esac
+    (( $# == 3 )) || usage
+    plan "$2" "$3" full
     ;;
   --revisions)
-    case "$#" in
-      3)
-        mode_for_revisions "$2" "$3"
-        emit_mode "$publication_mode"
-        ;;
-      4)
-        mode_for_revisions "$2" "$3"
-        plan "$4" "$publication_mode" "$2"
-        ;;
-      *)
-        usage
-        ;;
-    esac
+    if (( $# == 3 )); then
+      mode_for_revisions "$2" "$3"
+      printf 'publish_mode=%s\n' "$publication_mode"
+    elif (( $# == 5 )); then
+      mode_for_revisions "$2" "$3"
+      plan "$4" "$5" "$publication_mode" "$2"
+    else
+      usage
+    fi
     ;;
   *)
     usage

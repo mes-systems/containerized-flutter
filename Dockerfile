@@ -1,4 +1,6 @@
-FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS flutter-sdk
+ARG BASE_IMAGE
+
+FROM ${BASE_IMAGE} AS flutter-sdk
 
 ARG FLUTTER_VERSION
 ARG FLUTTER_CHANNEL=stable
@@ -28,7 +30,7 @@ RUN set -eux; \
   test "$(git -C /opt/flutter rev-parse HEAD)" = "${FLUTTER_REVISION}"; \
   git -C /opt/flutter tag --points-at HEAD | grep -Fx -- "${FLUTTER_VERSION}"
 
-FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+FROM ${BASE_IMAGE}
 
 ARG FLUTTER_VERSION
 ARG FLUTTER_CHANNEL=stable

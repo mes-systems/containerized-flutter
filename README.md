@@ -34,6 +34,22 @@ The published container has a separate output trust boundary: the tested
 image is pushed to GHCR and receives a GitHub Artifact Attestation bound to its
 exact OCI digest.
 
+## Base image trust
+
+Base images are maintainer-reviewed build inputs. Every supported base is
+listed in `supported_bases.json` and pinned to one immutable SHA256 reference;
+the manifest is the only base-image trust source. The Dockerfile does not
+choose a distribution or provide a fallback: both stages consume the validated
+`BASE_IMAGE` supplied by CI or publication.
+
+The current support list contains only Ubuntu 24.04:
+
+| Base ID | Family | Version | Variant | Digest |
+| --- | --- | --- | --- | --- |
+| `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:224a1869083a...` |
+
+Debian variants are planned work, not currently supported.
+
 ## Supported releases
 
 Containerized Flutter actively maintains the latest patch release of up to four
@@ -70,20 +86,20 @@ ghcr.io/mes-systems/containerized-flutter
 
 The canonical human-readable tag is:
 
-`{flutter_version}-ubuntu{ubuntu_version}-{ubuntu_digest_short}`
+`{flutter_version}-{base_id}-{base_digest_short}`
 
 For example:
 
 ```
-3.47.3-ubuntu24.04-a61567bd3182
+3.47.3-ubuntu24.04-224a1869083a
 ```
 
 The source-revision-qualified build tag adds the first 12 characters of the
 repository Git SHA:
 
-`{flutter_version}-ubuntu{ubuntu_version}-{ubuntu_digest_short}-g<repository_sha_short>`
+`{flutter_version}-{base_id}-{base_digest_short}-g<repository_sha_short>`
 
-The first tag identifies the Flutter and Ubuntu inputs. The second also
+The first tag identifies the Flutter and base inputs. The second also
 identifies the source revision used for the container build. Neither tag is a
 substitute for the final immutable identity. For strict reproducibility, pin
 the exact OCI digest:
@@ -177,10 +193,11 @@ resets its stable automation branch from current `main`, and proposes a PR; it
 does not modify `main` or merge automatically. Ordinary PR CI remains the
 acceptance gate.
 
-Dependabot checks the pinned Ubuntu 24.04 Docker digest weekly. When Ubuntu
-changes, its short digest changes the public image tags, while previous tags
-and OCI digests remain addressable. Dependabot also checks pinned GitHub
-Actions revisions weekly.
+Dependabot checks pinned GitHub Actions revisions weekly. Docker Dependabot is
+not configured because `FROM ${BASE_IMAGE}` is resolved from the maintainer-
+reviewed `supported_bases.json` manifest. Base refresh automation is
+temporarily deferred to a dedicated base watcher in a follow-up PR; a
+maintainer-reviewed manifest change currently supplies base updates.
 
 ## CI and maintenance
 
@@ -189,8 +206,10 @@ but do not rebuild the supported Flutter matrix. The shared change classifier
 allows this only when every changed path is explicitly harmless; any unknown or
 toolchain-relevant path defaults to full validation. Manual workflow dispatch
 can force the full matrix, and a main-branch publication follows the same
-classification before pushing or attesting images. A manifest-only publication
-builds newly added or replacement Flutter versions only; Dockerfile, base-image,
-or packaging changes rebuild the full active matrix. Retired GHCR artifacts are
-not deleted. Watcher PRs still pass through this ordinary full-matrix CI gate;
-the watcher does not bypass release verification or image tests.
+classification before pushing or attesting images. A supported-version change
+publishes changed Flutter releases across all current bases; a supported-base
+digest change publishes all current Flutter releases for that base. Dockerfile,
+build-matrix, metadata, and packaging changes rebuild the full active matrix.
+Retired GHCR artifacts are not deleted. Watcher PRs still pass through this
+ordinary full-matrix CI gate; the watcher does not bypass release verification
+or image tests.
