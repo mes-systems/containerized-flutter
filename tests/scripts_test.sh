@@ -58,6 +58,7 @@ command -v grep >/dev/null 2>&1 || fail 'required command not found: grep'
 "$validator" "$manifest"
 "$base_validator" "$base_manifest"
 python3 "$ROOT_DIR/tests/test_update_supported_versions.py"
+python3 "$ROOT_DIR/tests/test_update_supported_bases.py"
 "$dockerfile_guard" "$ROOT_DIR/Dockerfile"
 current_matrix="$("$build_matrix_script" "$manifest" "$base_manifest")"
 [[ "$(jq -er '.include | length' <<< "$current_matrix")" == 3 ]] \
@@ -101,14 +102,17 @@ assert_classification true --revisions not-a-base not-a-head
 
 assert_publication_mode none README.md
 assert_publication_mode none .github/workflows/flutter-release-watch.yml
+assert_publication_mode none .github/workflows/base-image-watch.yml
 assert_publication_mode none .github/workflows/publish.yml
 assert_publication_mode none .github/workflows/ci.yml
 assert_publication_mode none scripts/update-supported-versions.py
+assert_publication_mode none scripts/update-supported-bases.py
 assert_publication_mode none scripts/verify-release.sh
 assert_publication_mode none scripts/acquire-flutter.sh
 assert_publication_mode none scripts/smoke-test.sh
 assert_publication_mode none scripts/classify-changes.sh
 assert_publication_mode none tests/test_update_supported_versions.py
+assert_publication_mode none tests/test_update_supported_bases.py
 assert_publication_mode none LICENSE SECURITY.md .github/dependabot.yml docs/maintenance.md
 assert_publication_mode selective supported_version.json
 assert_publication_mode selective supported_bases.json
@@ -689,5 +693,52 @@ assert_contains 'Configure it for the `main` branch/ref with no required reviewe
 assert_no_text_match 'secrets\.FLUTTER_WATCHER_(APP|CLIENT)_ID|app-id:|peter-evans|create-pull-request|github-actions-create-pr|secrets\.PAT|secrets\.GH_TOKEN' \
   "$watcher_source"
 assert_no_text_match 'git config user\.name "flutter-release-watcher\[bot\]"' "$watcher_source"
+
+base_watcher_source="$(sed -n '1,360p' "$ROOT_DIR/.github/workflows/base-image-watch.yml")"
+assert_contains 'cron: "47 4 * * 1"' "$base_watcher_source"
+assert_contains 'workflow_dispatch:' "$base_watcher_source"
+assert_contains 'group: base-image-watcher' "$base_watcher_source"
+assert_contains 'cancel-in-progress: false' "$base_watcher_source"
+assert_contains 'contents: read' "$base_watcher_source"
+assert_contains 'ref: main' "$base_watcher_source"
+assert_contains 'persist-credentials: false' "$base_watcher_source"
+assert_contains 'name: base-image-watcher' "$base_watcher_source"
+assert_contains 'deployment: false' "$base_watcher_source"
+assert_contains 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' \
+  "$base_watcher_source"
+assert_contains 'client-id: ${{ vars.BASE_WATCHER_CLIENT_ID }}' "$base_watcher_source"
+assert_contains 'private-key: ${{ secrets.BASE_WATCHER_PRIVATE_KEY }}' "$base_watcher_source"
+assert_contains 'git fetch --no-tags origin main' "$base_watcher_source"
+assert_contains 'automation/base-image-update' "$base_watcher_source"
+assert_contains 'git checkout -B "$WATCHER_BRANCH" origin/main' "$base_watcher_source"
+assert_contains 'steps.app-token.outputs.app-slug' "$base_watcher_source"
+assert_contains 'scripts/update-supported-bases.py' "$base_watcher_source"
+assert_contains '--manifest supported_bases.json' "$base_watcher_source"
+assert_contains '--readme README.md' "$base_watcher_source"
+assert_contains '--write' "$base_watcher_source"
+assert_contains 'python3 -m unittest tests/test_update_supported_bases.py' "$base_watcher_source"
+assert_contains 'scripts/validate-supported-bases.sh supported_bases.json' "$base_watcher_source"
+assert_contains 'tests/scripts_test.sh' "$base_watcher_source"
+assert_contains 'git diff --check' "$base_watcher_source"
+assert_contains 'git add supported_bases.json README.md' "$base_watcher_source"
+assert_contains '--force-with-lease' "$base_watcher_source"
+assert_contains 'gh pr list' "$base_watcher_source"
+assert_contains 'gh pr edit' "$base_watcher_source"
+assert_contains 'gh pr create' "$base_watcher_source"
+assert_contains 'security_anomaly' "$base_watcher_source"
+assert_contains 'gh issue list' "$base_watcher_source"
+assert_contains 'gh issue edit' "$base_watcher_source"
+assert_contains 'gh issue create' "$base_watcher_source"
+assert_no_text_match 'gh pr merge|git push[^\n]*main|secrets\.(PAT|GH_TOKEN)|peter-evans|create-pull-request' \
+  "$base_watcher_source"
+assert_contains 'BEGIN GENERATED SUPPORTED BASES' "$(< "$ROOT_DIR/README.md")"
+assert_contains 'END GENERATED SUPPORTED BASES' "$(< "$ROOT_DIR/README.md")"
+assert_no_text_match 'Base refresh automation is.*deferred' "$(< "$ROOT_DIR/README.md")"
+
+while IFS= read -r uses_line; do
+  action_ref="$(sed -E 's/.*uses: [^@]+@([^ #]+).*/\1/' <<< "$uses_line")"
+  [[ "$action_ref" =~ ^[0-9a-f]{40}$ ]] \
+    || fail "GitHub Action is not pinned to a full commit SHA: $uses_line"
+done < <(grep -hE '^[[:space:]]+uses: [^@]+@' "$ROOT_DIR"/.github/workflows/*.yml)
 
 printf 'PASS: script and supply-chain guardrails\n'

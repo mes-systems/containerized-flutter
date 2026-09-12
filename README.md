@@ -44,9 +44,11 @@ choose a distribution or provide a fallback: both stages consume the validated
 
 The current support list contains only Ubuntu 24.04:
 
+<!-- BEGIN GENERATED SUPPORTED BASES -->
 | Base ID | Family | Version | Variant | Digest |
 | --- | --- | --- | --- | --- |
 | `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:224a1869083a...` |
+<!-- END GENERATED SUPPORTED BASES -->
 
 Debian variants are planned work, not currently supported.
 
@@ -195,9 +197,18 @@ acceptance gate.
 
 Dependabot checks pinned GitHub Actions revisions weekly. Docker Dependabot is
 not configured because `FROM ${BASE_IMAGE}` is resolved from the maintainer-
-reviewed `supported_bases.json` manifest. Base refresh automation is
-temporarily deferred to a dedicated base watcher in a follow-up PR; a
-maintainer-reviewed manifest change currently supplies base updates.
+reviewed `supported_bases.json` manifest. A dedicated base watcher updates
+`supported_bases.json` by checking upstream Docker Hub tags weekly and
+proposing digest changes through a normal pull request. Base changes are never
+merged automatically; merging a base digest update selectively republishes
+every supported Flutter version for that base.
+
+The base watcher requires a repository Environment named
+`base-image-watcher`. Configure it for the `main` branch/ref with no required
+reviewer and add only:
+
+- Environment variable: `BASE_WATCHER_CLIENT_ID`
+- Environment secret: `BASE_WATCHER_PRIVATE_KEY`
 
 ## CI and maintenance
 
