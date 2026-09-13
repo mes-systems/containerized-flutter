@@ -52,6 +52,7 @@ classify_paths() {
 classify_revisions() {
   local base="$1"
   local head="$2"
+  local merge_base
   local diff_file
   local path_count=0
 
@@ -60,11 +61,21 @@ classify_revisions() {
   git rev-parse --verify "${base}^{commit}" >/dev/null 2>&1 || { fail_safe; return; }
   git rev-parse --verify "${head}^{commit}" >/dev/null 2>&1 || { fail_safe; return; }
 
+  if ! merge_base="$(git merge-base "$base" "$head")"; then
+    fail_safe
+    return
+  fi
+  if [[ ! "$merge_base" =~ ^[[:xdigit:]]{40}$ ]] \
+    || ! git rev-parse --verify "${merge_base}^{commit}" >/dev/null 2>&1; then
+    fail_safe
+    return
+  fi
+
   if ! diff_file="$(mktemp "${TMPDIR:-/tmp}/classify-changes.XXXXXX")"; then
     fail_safe
     return
   fi
-  if ! git diff --name-only --no-renames -z "$base" "$head" -- > "$diff_file"; then
+  if ! git diff --name-only --no-renames -z "$merge_base" "$head" -- > "$diff_file"; then
     rm -f -- "$diff_file"
     fail_safe
     return

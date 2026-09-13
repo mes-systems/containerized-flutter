@@ -53,7 +53,6 @@ jobs:
             exit 0
           fi
           printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
-          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
           scripts/classify-changes.sh --revisions "$base_sha" "$head_sha" \
             >> "$GITHUB_OUTPUT"
 
@@ -78,15 +77,14 @@ jobs:
               trap 'rm -rf -- "$temp_dir"' EXIT
               old_versions="$temp_dir/supported_version.json"
               old_bases="$temp_dir/supported_bases.json"
-              new_versions="$temp_dir/head-supported_version.json"
-              new_bases="$temp_dir/head-supported_bases.json"
+              new_versions="$temp_dir/tested-supported_version.json"
+              new_bases="$temp_dir/tested-supported_bases.json"
               base_sha="${{ steps.classify.outputs.base_sha }}"
-              head_sha="${{ steps.classify.outputs.head_sha }}"
 
               if ! git show "$base_sha:supported_version.json" > "$old_versions" \
                 || ! git show "$base_sha:supported_bases.json" > "$old_bases" \
-                || ! git show "$head_sha:supported_version.json" > "$new_versions" \
-                || ! git show "$head_sha:supported_bases.json" > "$new_bases"; then
+                || ! cp supported_version.json "$new_versions" \
+                || ! cp supported_bases.json "$new_bases"; then
                 printf 'could not read PR manifests; falling back to full CI\n' >&2
                 ci_mode=full
               elif ! scripts/validate-supported-versions.sh "$old_versions" \
@@ -103,6 +101,33 @@ jobs:
                   ci_mode=full
                 elif ! jq -e '.include | type == "array"' <<< "$matrix" >/dev/null; then
                   printf 'selective CI planner returned a malformed matrix; falling back to full CI\n' >&2
+                  ci_mode=full
+                elif ! jq -e \
+                  --slurpfile versions "$new_versions" \
+                  --slurpfile bases "$new_bases" '
+                    (.include | type == "array")
+                    and all(
+                      .include[];
+                      . as $row
+                      | any(
+                          $versions[0].supported_versions[];
+                          .version == $row.version
+                          and .channel == $row.channel
+                          and .revision == $row.revision
+                          and .archive == $row.archive
+                          and .archive_sha256 == $row.archive_sha256
+                        )
+                      and any(
+                          $bases[0].bases[];
+                          .id == $row.base_id
+                          and .family == $row.base_family
+                          and .version == $row.base_version
+                          and .variant == $row.base_variant
+                          and .reference == $row.base_reference
+                        )
+                    )
+                  ' <<< "$matrix" >/dev/null; then
+                  printf 'selective CI matrix is inconsistent with the tested manifests; falling back to full CI\n' >&2
                   ci_mode=full
                 elif [[ "$(jq -r '.include | length' <<< "$matrix")" == 0 ]]; then
                   printf 'selective CI planner returned an unexpected empty matrix\n' >&2
