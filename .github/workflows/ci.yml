@@ -119,7 +119,6 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build image
-        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -141,31 +140,66 @@ jobs:
             SOURCE_REVISION=${{ github.sha }}
 
       - name: Verify local build attestations
-        env:
-          BUILD_METADATA: ${{ steps.build.outputs.metadata }}
         run: |
           set -euo pipefail
 
-          build_ref="$(
-            jq -er '."buildx.build.ref"' <<< "$BUILD_METADATA"
-          )"
-          builder="${build_ref%%/*}"
-          record="${build_ref##*/}"
-          [[ -n "$builder" && -n "$record" && "$builder" != "$build_ref" ]]
+          image="ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }}"
+          expected_base_digest="${{ matrix.base_reference }}"
+          expected_base_digest="${expected_base_digest##*@}"
+          expected_base_digest="${expected_base_digest#sha256:}"
+          [[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]
 
-          history="$(
-            docker buildx \
-              --builder "$builder" \
-              history inspect "$record" \
-              --format json
+          attestations="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --unix-socket /var/run/docker.sock \
+              --get \
+              --data-urlencode 'platform={"os":"linux","architecture":"amd64"}' \
+              --data-urlencode 'statement=1' \
+              "http://localhost/v1.55/images/${image}/attestations"
           )"
 
-          jq -e '
-            [.Attachments[].Type] as $types
-            | ($types | index("https://slsa.dev/provenance/v1")) != null
+          jq --arg digest "$expected_base_digest" -e '
+            type == "array"
             and
-            ($types | index("https://spdx.dev/Document")) != null
-          ' <<< "$history" >/dev/null
+            any(.[];
+              .PredicateType == "https://slsa.dev/provenance/v1"
+              and (.Statement | type == "object")
+              and .Statement.predicateType == "https://slsa.dev/provenance/v1"
+              and (.Statement.predicate.buildDefinition | type == "object")
+              and (.Statement.predicate.runDetails | type == "object")
+              and (
+                .Statement.predicate.buildDefinition.buildType
+                == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
+              )
+              and (
+                .Statement.predicate.buildDefinition.resolvedDependencies
+                | type == "array" and length > 0
+              )
+              and any(
+                .Statement.predicate.buildDefinition.resolvedDependencies[]?;
+                .digest.sha256 == $digest
+              )
+              and (
+                .Statement.predicate.buildDefinition.internalParameters.buildConfig.llbDefinition
+                | type == "array" and length > 0
+              )
+              and (
+                .Statement.predicate.runDetails.metadata.buildkit_completeness.request
+                == true
+              )
+            )
+            and
+            any(.[];
+              .PredicateType == "https://spdx.dev/Document"
+              and (.Statement | type == "object")
+              and .Statement.predicateType == "https://spdx.dev/Document"
+              and .Statement.predicate.SPDXID == "SPDXRef-DOCUMENT"
+              and (.Statement.predicate.spdxVersion | type == "string")
+            )
+          ' <<< "$attestations" >/dev/null
 
       - name: Smoke test image
         run: |
