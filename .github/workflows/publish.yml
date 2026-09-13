@@ -186,6 +186,9 @@ jobs:
           expected_base_digest="${{ matrix.base_reference }}"
           expected_base_digest="${expected_base_digest##*@}"
           expected_base_digest="${expected_base_digest#sha256:}"
+          expected_base_digest="$(
+            printf '%s' "$expected_base_digest" | tr '[:upper:]' '[:lower:]'
+          )"
           [[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]
 
           attestations="$(
@@ -279,6 +282,9 @@ jobs:
           expected_base_digest="${{ matrix.base_reference }}"
           expected_base_digest="${expected_base_digest##*@}"
           expected_base_digest="${expected_base_digest#sha256:}"
+          expected_base_digest="$(
+            printf '%s' "$expected_base_digest" | tr '[:upper:]' '[:lower:]'
+          )"
           [[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]
 
           provenance="$(

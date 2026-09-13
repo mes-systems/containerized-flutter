@@ -1081,6 +1081,13 @@ for workflow_name in ci publish; do
   assert_contains 'expected_base_digest="${{ matrix.base_reference }}"' "$attest_source"
   assert_contains 'expected_base_digest="${expected_base_digest##*@}"' "$attest_source"
   assert_contains 'expected_base_digest="${expected_base_digest#sha256:}"' "$attest_source"
+  assert_contains "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+    "$attest_source"
+  assert_before 'expected_base_digest="${expected_base_digest#sha256:}"' \
+    "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+    "$attest_source"
+  assert_before "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+    '[[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]' "$attest_source"
   assert_contains 'jq --arg digest "$expected_base_digest" -e' "$attest_source"
   assert_contains 'type == "array"' "$attest_source"
   assert_contains 'PredicateType' "$attest_source"
@@ -1127,6 +1134,13 @@ assert_contains 'steps.build.outputs.digest' "$publish_push_source"
 assert_contains 'expected_base_digest="${{ matrix.base_reference }}"' "$publish_push_source"
 assert_contains 'expected_base_digest="${expected_base_digest##*@}"' "$publish_push_source"
 assert_contains 'expected_base_digest="${expected_base_digest#sha256:}"' "$publish_push_source"
+assert_contains "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+  "$publish_push_source"
+assert_before 'expected_base_digest="${expected_base_digest#sha256:}"' \
+  "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+  "$publish_push_source"
+assert_before "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+  '[[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]' "$publish_push_source"
 assert_contains 'jq --arg digest "$expected_base_digest" -e' "$publish_push_source"
 assert_contains '.buildDefinition.resolvedDependencies[]' "$publish_push_source"
 assert_contains '.digest.sha256 == $digest' "$publish_push_source"
