@@ -18,7 +18,7 @@ assert_no_text_match() {
   local pattern="$1"
   local haystack="$2"
   local status
-  if grep -nE "$pattern" <<< "$haystack"; then
+  if grep -nE -- "$pattern" <<< "$haystack"; then
     fail "unexpected match: $pattern"
   else
     status=$?
@@ -958,27 +958,227 @@ acquire_source="$(sed -n '1,180p' "$ROOT_DIR/scripts/acquire-flutter.sh")"
 assert_no_text_match 'empty Flutter attestation bundle' "$acquire_source"
 assert_contains 'optional Flutter attestation bundle unavailable' "$acquire_source"
 
-publish_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/publish.yml")"
+publish_source="$(sed -n '1,400p' "$ROOT_DIR/.github/workflows/publish.yml")"
 publish_cleanup_source="$(sed -n '/^      - name: Remove tested image/,$p' <<< "$publish_source")"
 publication_source="$(sed -n '1,280p' "$publication_classifier")"
+ci_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/ci.yml")"
+expected_build_arg_keys="$(
+  printf '%s\n' \
+    BASE_IMAGE \
+    FLUTTER_VERSION \
+    FLUTTER_CHANNEL \
+    FLUTTER_REVISION \
+    FLUTTER_ARCHIVE_SHA256 \
+    SOURCE_REVISION \
+    | sort
+)"
+build_arg_keys() {
+  awk '
+    /^          build-args: \|$/ { in_block = 1; next }
+    in_block && $0 !~ /^            [A-Z_][A-Z0-9_]*=/ { exit }
+    in_block {
+      key = $0
+      sub(/=.*/, "", key)
+      sub(/^[[:space:]]*/, "", key)
+      print key
+    }
+  ' <<< "$1" | sort
+}
+workflow_step() {
+  awk -v target="$1" '
+    $0 == "      - name: " target { in_step = 1; print; next }
+    in_step && $0 ~ /^      - name: / { exit }
+    in_step { print }
+  ' <<< "$2"
+}
+line_number() {
+  awk -v needle="$1" 'index($0, needle) { print NR; exit }' <<< "$2"
+}
+assert_before() {
+  local before="$1"
+  local after="$2"
+  local source="$3"
+  local before_line after_line
+  before_line="$(line_number "$before" "$source")"
+  after_line="$(line_number "$after" "$source")"
+  [[ "$before_line" =~ ^[0-9]+$ && "$after_line" =~ ^[0-9]+$ ]] \
+    || fail "missing workflow order marker: $before -> $after"
+  (( before_line < after_line )) \
+    || fail "workflow order is wrong: $before -> $after"
+}
+ci_docker_setup_source="$(workflow_step \
+  'Set up Docker with containerd image store' "$ci_source")"
+publish_docker_setup_source="$(workflow_step \
+  'Set up Docker with containerd image store' "$publish_source")"
+ci_docker_verify_source="$(workflow_step \
+  'Verify containerd image store' "$ci_source")"
+publish_docker_verify_source="$(workflow_step \
+  'Verify containerd image store' "$publish_source")"
+ci_build_source="$(workflow_step 'Build image' "$ci_source")"
+publish_build_source="$(workflow_step 'Build image locally' "$publish_source")"
+ci_attest_source="$(workflow_step 'Verify local build attestations' "$ci_source")"
+publish_attest_source="$(workflow_step 'Verify local build attestations' "$publish_source")"
+publish_push_source="$(workflow_step 'Push tested image and capture digest' "$publish_source")"
 [[ "$(grep -c '^classify_path() {' <<< "$publication_source")" == 1 ]] \
   || fail 'publication path policy must have one classify_path helper'
 [[ "$(grep -c 'Dockerfile|\.dockerignore|scripts/image-metadata\.sh' \
   <<< "$publication_source")" == 1 ]] \
   || fail 'publication artifact input policy must have one path table'
 assert_no_text_match 'awk.*digest:' "$publish_source"
-assert_contains 'docker image inspect' "$publish_source"
-assert_contains '.RepoDigests' "$publish_source"
-assert_contains 'provenance: false' "$(sed -n '1,240p' "$ROOT_DIR/.github/workflows/ci.yml")"
+for docker_setup_source in "$ci_docker_setup_source" "$publish_docker_setup_source"; do
+  assert_contains 'id: docker' "$docker_setup_source"
+  assert_contains 'uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1' \
+    "$docker_setup_source"
+  assert_contains 'version: v29.8.0' "$docker_setup_source"
+  assert_contains '"containerd-snapshotter": true' "$docker_setup_source"
+done
+for docker_verify_source in "$ci_docker_verify_source" "$publish_docker_verify_source"; do
+  assert_contains "docker info --format '{{json .DriverStatus}}'" "$docker_verify_source"
+  assert_contains "grep -F 'io.containerd.snapshotter.v1'" "$docker_verify_source"
+done
+for build_source in "$ci_build_source" "$publish_build_source"; do
+  assert_contains 'platforms: linux/amd64' "$build_source"
+  assert_contains 'load: true' "$build_source"
+  assert_contains 'push: false' "$build_source"
+  assert_contains 'provenance: mode=max,version=v1' "$build_source"
+  assert_contains 'sbom: true' "$build_source"
+done
+assert_contains 'provenance: mode=max,version=v1' "$ci_source"
+assert_contains 'provenance: mode=max,version=v1' "$publish_source"
+assert_contains 'sbom: true' "$ci_source"
+assert_contains 'sbom: true' "$publish_source"
+assert_no_text_match 'provenance: false' "$ci_source"
+assert_no_text_match 'provenance: false' "$publish_source"
+assert_no_text_match '\.RepoDigests' "$publish_push_source"
+assert_contains 'docker buildx imagetools inspect' "$publish_push_source"
+assert_contains '.Manifest.Digest' "$publish_push_source"
+assert_contains '.Provenance.SLSA' "$publish_push_source"
+assert_contains '.SBOM.SPDX' "$publish_push_source"
+assert_contains "docker info --format '{{json .DriverStatus}}'" "$ci_source"
+assert_contains "docker info --format '{{json .DriverStatus}}'" "$publish_source"
+assert_contains 'io.containerd.snapshotter.v1' "$ci_source"
+assert_contains 'io.containerd.snapshotter.v1' "$publish_source"
+for workflow_name in ci publish; do
+  workflow_source="$ci_source"
+  attest_source="$ci_attest_source"
+  [[ "$workflow_name" == publish ]] && workflow_source="$publish_source"
+  [[ "$workflow_name" == publish ]] && attest_source="$publish_attest_source"
+  [[ "$(build_arg_keys "$workflow_source")" == "$expected_build_arg_keys" ]] \
+    || fail "$workflow_name build-args keys differ from the public whitelist"
+  build_args_source="$(sed -n '/^          build-args: |$/,/^$/p' <<< "$workflow_source")"
+  assert_no_text_match 'secrets\.' "$build_args_source"
+  assert_contains 'name: Verify local build attestations' "$attest_source"
+  assert_contains 'curl' "$attest_source"
+  assert_contains '--fail-with-body' "$attest_source"
+  assert_contains '--silent' "$attest_source"
+  assert_contains '--show-error' "$attest_source"
+  assert_contains '--unix-socket "$docker_socket"' "$attest_source"
+  assert_contains '--get' "$attest_source"
+  assert_contains "--data-urlencode 'platform={\"os\":\"linux\",\"architecture\":\"amd64\"}'" \
+    "$attest_source"
+  assert_contains "--data-urlencode 'statement=1'" "$attest_source"
+  assert_contains 'http://localhost/v1.55/images/${image}/attestations' "$attest_source"
+  assert_contains 'expected_base_digest="${{ matrix.base_reference }}"' "$attest_source"
+  assert_contains 'expected_base_digest="${expected_base_digest##*@}"' "$attest_source"
+  assert_contains 'expected_base_digest="${expected_base_digest#sha256:}"' "$attest_source"
+  assert_contains "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+    "$attest_source"
+  assert_before 'expected_base_digest="${expected_base_digest#sha256:}"' \
+    "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+    "$attest_source"
+  assert_before "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+    '[[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]' "$attest_source"
+  assert_contains 'jq --arg digest "$expected_base_digest" -e' "$attest_source"
+  assert_contains 'type == "array"' "$attest_source"
+  assert_contains 'PredicateType' "$attest_source"
+  assert_contains 'https://slsa.dev/provenance/v1' "$attest_source"
+  assert_contains 'https://spdx.dev/Document' "$attest_source"
+  assert_contains '.Statement.predicateType' "$attest_source"
+  assert_contains '.Statement.predicate.buildDefinition' "$attest_source"
+  assert_contains '.Statement.predicate.runDetails' "$attest_source"
+  assert_contains 'https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md' \
+    "$attest_source"
+  assert_contains '.Statement.predicate.buildDefinition.resolvedDependencies[]?' \
+    "$attest_source"
+  assert_contains '.digest.sha256 == $digest' "$attest_source"
+  assert_contains '.Statement.predicate.buildDefinition.internalParameters.buildConfig.llbDefinition' \
+    "$attest_source"
+  assert_contains '.Statement.predicate.runDetails.metadata.buildkit_completeness.request' \
+    "$attest_source"
+  assert_contains '.Statement.predicate.SPDXID == "SPDXRef-DOCUMENT"' "$attest_source"
+  assert_contains '.Statement.predicate.spdxVersion | type == "string"' "$attest_source"
+  assert_no_text_match 'BUILD_METADATA' "$attest_source"
+  assert_no_text_match 'steps\.build\.outputs\.metadata' "$attest_source"
+  assert_no_text_match 'buildx\.build\.ref' "$attest_source"
+  assert_no_text_match 'history inspect' "$attest_source"
+  assert_no_text_match 'Attachments\[\]\.Type' "$attest_source"
+  assert_contains 'DOCKER_SOCKET: ${{ steps.docker.outputs.sock }}' "$attest_source"
+  assert_contains 'docker_socket_uri="${DOCKER_SOCKET:?docker/setup-docker-action did not return a socket}"' \
+    "$attest_source"
+  assert_contains 'case "$docker_socket_uri" in' "$attest_source"
+  assert_contains 'unix://*)' "$attest_source"
+  assert_contains 'docker_socket="${docker_socket_uri#unix://}"' "$attest_source"
+  assert_contains 'if [[ ! -S "$docker_socket" ]]; then' "$attest_source"
+  assert_contains 'Docker socket does not exist or is not a Unix socket: %s\n' "$attest_source"
+  assert_contains '--unix-socket "$docker_socket"' "$attest_source"
+  assert_no_text_match '--unix-socket /var/run/docker\.sock' "$attest_source"
+done
+assert_contains 'image="ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }}"' \
+  "$ci_attest_source"
+assert_contains 'image="${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.tag }}"' \
+  "$publish_attest_source"
+assert_no_text_match '^        id: build$' "$ci_build_source"
+assert_contains 'id: build' "$publish_build_source"
+assert_contains 'expected_digest=' "$publish_push_source"
+assert_contains 'steps.build.outputs.digest' "$publish_push_source"
+assert_contains 'expected_base_digest="${{ matrix.base_reference }}"' "$publish_push_source"
+assert_contains 'expected_base_digest="${expected_base_digest##*@}"' "$publish_push_source"
+assert_contains 'expected_base_digest="${expected_base_digest#sha256:}"' "$publish_push_source"
+assert_contains "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+  "$publish_push_source"
+assert_before 'expected_base_digest="${expected_base_digest#sha256:}"' \
+  "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+  "$publish_push_source"
+assert_before "printf '%s' \"\$expected_base_digest\" | tr '[:upper:]' '[:lower:]'" \
+  '[[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]' "$publish_push_source"
+assert_contains 'jq --arg digest "$expected_base_digest" -e' "$publish_push_source"
+assert_contains '.buildDefinition.resolvedDependencies[]' "$publish_push_source"
+assert_contains '.digest.sha256 == $digest' "$publish_push_source"
+assert_contains 'registry_digest=' "$publish_push_source"
+assert_contains 'canonical_digest=' "$publish_push_source"
+assert_contains 'docker push "$IMAGE_NAME:$BUILD_TAG"' "$publish_push_source"
+assert_contains 'docker push "$IMAGE_NAME:$CANONICAL_TAG"' "$publish_push_source"
+assert_contains '[[ "$canonical_digest" == "$registry_digest" ]]' "$publish_push_source"
+assert_contains 'printf '\''digest=%s\n'\'' "$registry_digest"' "$publish_push_source"
+assert_before 'name: Verify containerd image store' 'name: Set up Docker Buildx' "$ci_source"
+assert_before 'name: Verify containerd image store' 'name: Set up Docker Buildx' "$publish_source"
+assert_before 'name: Verify local build attestations' 'name: Smoke test image' "$ci_source"
+assert_before 'name: Verify local build attestations' 'name: Smoke test image' "$publish_source"
+assert_before 'docker push "$IMAGE_NAME:$BUILD_TAG"' 'provenance=' "$publish_push_source"
+assert_before 'provenance=' 'docker push "$IMAGE_NAME:$CANONICAL_TAG"' "$publish_push_source"
+assert_before 'sbom=' 'docker push "$IMAGE_NAME:$CANONICAL_TAG"' "$publish_push_source"
+assert_before 'name: Smoke test image' 'name: Log in to GHCR' "$publish_source"
+assert_before 'name: Log in to GHCR' 'docker push "$IMAGE_NAME:$BUILD_TAG"' "$publish_source"
+assert_before 'docker push "$IMAGE_NAME:$BUILD_TAG"' \
+  'docker push "$IMAGE_NAME:$CANONICAL_TAG"' "$publish_source"
+assert_before 'docker push "$IMAGE_NAME:$CANONICAL_TAG"' \
+  'name: Attest published image' "$publish_source"
 assert_contains 'push-to-registry: false' "$publish_source"
 assert_contains 'create-storage-record: false' "$publish_source"
 assert_no_text_match 'artifact-metadata: write' "$publish_source"
-assert_contains 'Remove tested image' "$(sed -n '1,240p' "$ROOT_DIR/.github/workflows/ci.yml")"
+assert_contains 'Remove tested image' "$ci_source"
 assert_contains 'Remove tested image' "$publish_source"
 assert_contains 'test image leaked after cleanup' "$publish_cleanup_source"
 assert_no_text_match '\|\| true' "$publish_cleanup_source"
+assert_before 'name: Set up Docker with containerd image store' \
+  'name: Verify containerd image store' "$ci_source"
+assert_before 'name: Set up Docker with containerd image store' \
+  'name: Verify containerd image store' "$publish_source"
+assert_before 'name: Set up Docker Buildx' 'name: Build image' "$ci_source"
+assert_before 'name: Set up Docker Buildx' 'name: Build image locally' "$publish_source"
+assert_before 'name: Build image' 'name: Verify local build attestations' "$ci_source"
+assert_before 'name: Build image locally' 'name: Verify local build attestations' "$publish_source"
 
-ci_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/ci.yml")"
 ci_cleanup_source="$(sed -n '/^      - name: Remove tested image/,/^  ci-gate:/p' <<< "$ci_source")"
 ci_metadata_source="$(sed -n '/^      - name: Derive image metadata/,/^      - name: Set up Docker Buildx/p' <<< "$ci_source")"
 assert_contains 'scripts/classify-changes.sh --revisions' "$ci_source"
@@ -1036,7 +1236,20 @@ assert_no_text_match 'Dockerfile|FROM|awk.*digest' "$metadata_source"
 dependabot_source="$(sed -n '1,120p' "$ROOT_DIR/.github/dependabot.yml")"
 assert_no_text_match 'package-ecosystem: docker' "$dependabot_source"
 assert_contains 'package-ecosystem: github-actions' "$dependabot_source"
-assert_contains 'dedicated base watcher' "$(< "$ROOT_DIR/README.md")"
+readme_source="$(< "$ROOT_DIR/README.md")"
+assert_contains 'dedicated base watcher' "$readme_source"
+assert_contains 'BuildKit provenance:' "$readme_source"
+assert_contains 'describes how the OCI image was built' "$readme_source"
+assert_contains 'GitHub Artifact Attestation:' "$readme_source"
+assert_contains 'authenticates that the exact published digest came from the' "$readme_source"
+assert_contains 'SLSA provenance format: v1' "$readme_source"
+assert_contains 'BuildKit provenance mode: max' "$readme_source"
+assert_contains 'SBOM format: SPDX' "$readme_source"
+assert_contains "--format '{{json .Provenance.SLSA}}'" "$readme_source"
+assert_contains "--format '{{json .SBOM.SPDX}}'" "$readme_source"
+assert_contains 'exact published artifact => exact OCI digest' "$readme_source"
+assert_no_text_match 'SLSA Level 3|fully SLSA compliant|end-to-end SLSA|fully reproducible' \
+  "$readme_source"
 
 watcher_source="$(sed -n '1,320p' "$ROOT_DIR/.github/workflows/flutter-release-watch.yml")"
 assert_contains 'cron: "17 3 * * *"' "$watcher_source"

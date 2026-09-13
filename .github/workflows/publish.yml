@@ -114,10 +114,29 @@ jobs:
             "${{ matrix.base_id }}" \
             supported_bases.json
 
+      - name: Set up Docker with containerd image store
+        id: docker
+        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5
+        with:
+          version: v29.8.0
+          daemon-config: |
+            {
+              "features": {
+                "containerd-snapshotter": true
+              }
+            }
+
+      - name: Verify containerd image store
+        run: |
+          set -euo pipefail
+          docker info --format '{{json .DriverStatus}}' \
+            | grep -F 'io.containerd.snapshotter.v1'
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build image locally
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -125,7 +144,8 @@ jobs:
           platforms: linux/amd64
           load: true
           push: false
-          provenance: false
+          provenance: mode=max,version=v1
+          sbom: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.tag }}
             ${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.build_tag }}
@@ -138,6 +158,90 @@ jobs:
             FLUTTER_REVISION=${{ matrix.revision }}
             FLUTTER_ARCHIVE_SHA256=${{ steps.verify.outputs.archive_sha256 }}
             SOURCE_REVISION=${{ github.sha }}
+
+      - name: Verify local build attestations
+        env:
+          DOCKER_SOCKET: ${{ steps.docker.outputs.sock }}
+        run: |
+          set -euo pipefail
+
+          docker_socket_uri="${DOCKER_SOCKET:?docker/setup-docker-action did not return a socket}"
+          case "$docker_socket_uri" in
+            unix://*)
+              docker_socket="${docker_socket_uri#unix://}"
+              ;;
+            *)
+              printf 'unexpected Docker socket URI: %s\n' "$docker_socket_uri" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ ! -S "$docker_socket" ]]; then
+            printf 'Docker socket does not exist or is not a Unix socket: %s\n' \
+              "$docker_socket" >&2
+            exit 1
+          fi
+
+          image="${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.tag }}"
+          expected_base_digest="${{ matrix.base_reference }}"
+          expected_base_digest="${expected_base_digest##*@}"
+          expected_base_digest="${expected_base_digest#sha256:}"
+          expected_base_digest="$(
+            printf '%s' "$expected_base_digest" | tr '[:upper:]' '[:lower:]'
+          )"
+          [[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]
+
+          attestations="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --unix-socket "$docker_socket" \
+              --get \
+              --data-urlencode 'platform={"os":"linux","architecture":"amd64"}' \
+              --data-urlencode 'statement=1' \
+              "http://localhost/v1.55/images/${image}/attestations"
+          )"
+
+          jq --arg digest "$expected_base_digest" -e '
+            type == "array"
+            and
+            any(.[];
+              .PredicateType == "https://slsa.dev/provenance/v1"
+              and (.Statement | type == "object")
+              and .Statement.predicateType == "https://slsa.dev/provenance/v1"
+              and (.Statement.predicate.buildDefinition | type == "object")
+              and (.Statement.predicate.runDetails | type == "object")
+              and (
+                .Statement.predicate.buildDefinition.buildType
+                == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
+              )
+              and (
+                .Statement.predicate.buildDefinition.resolvedDependencies
+                | type == "array" and length > 0
+              )
+              and any(
+                .Statement.predicate.buildDefinition.resolvedDependencies[]?;
+                .digest.sha256 == $digest
+              )
+              and (
+                .Statement.predicate.buildDefinition.internalParameters.buildConfig.llbDefinition
+                | type == "array" and length > 0
+              )
+              and (
+                .Statement.predicate.runDetails.metadata.buildkit_completeness.request
+                == true
+              )
+            )
+            and
+            any(.[];
+              .PredicateType == "https://spdx.dev/Document"
+              and (.Statement | type == "object")
+              and .Statement.predicateType == "https://spdx.dev/Document"
+              and .Statement.predicate.SPDXID == "SPDXRef-DOCUMENT"
+              and (.Statement.predicate.spdxVersion | type == "string")
+            )
+          ' <<< "$attestations" >/dev/null
 
       - name: Smoke test image
         run: |
@@ -163,23 +267,78 @@ jobs:
           BUILD_TAG: ${{ steps.metadata.outputs.build_tag }}
         run: |
           set -euo pipefail
-          image_digest() {
-            local reference="$1"
-            docker image inspect \
-              --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-              "$reference" \
-              | awk -F@ '$2 ~ /^sha256:[0-9a-f]{64}$/ { print $2; exit }'
-          }
+          docker push "$IMAGE_NAME:$BUILD_TAG"
+          registry_digest="$(
+            docker buildx imagetools inspect \
+              "$IMAGE_NAME:$BUILD_TAG" \
+              --format '{{.Manifest.Digest}}'
+          )"
+          [[ "$registry_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          expected_digest='${{ steps.build.outputs.digest }}'
+          [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$registry_digest" == "$expected_digest" ]]
+
+          expected_base_digest="${{ matrix.base_reference }}"
+          expected_base_digest="${expected_base_digest##*@}"
+          expected_base_digest="${expected_base_digest#sha256:}"
+          expected_base_digest="$(
+            printf '%s' "$expected_base_digest" | tr '[:upper:]' '[:lower:]'
+          )"
+          [[ "$expected_base_digest" =~ ^[0-9a-f]{64}$ ]]
+
+          provenance="$(
+            docker buildx imagetools inspect \
+              "$IMAGE_NAME:$BUILD_TAG" \
+              --format '{{json .Provenance.SLSA}}'
+          )"
+          jq --arg digest "$expected_base_digest" -e '
+            type == "object"
+            and (.buildDefinition | type == "object")
+            and (.runDetails | type == "object")
+            and (
+              .buildDefinition.buildType
+              == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
+            )
+            and (
+              .buildDefinition.resolvedDependencies
+              | type == "array" and length > 0
+            )
+            and (
+              any(
+                .buildDefinition.resolvedDependencies[];
+                .digest.sha256 == $digest
+              )
+            )
+            and (
+              .buildDefinition.internalParameters.buildConfig.llbDefinition
+              | type == "array" and length > 0
+            )
+            and (
+              .runDetails.metadata.buildkit_completeness.request == true
+            )
+          ' <<< "$provenance" >/dev/null
+
+          sbom="$(
+            docker buildx imagetools inspect \
+              "$IMAGE_NAME:$BUILD_TAG" \
+              --format '{{json .SBOM.SPDX}}'
+          )"
+          jq -e '
+            type == "object"
+            and .SPDXID == "SPDXRef-DOCUMENT"
+            and (.spdxVersion | type == "string")
+          ' <<< "$sbom" >/dev/null
 
           docker push "$IMAGE_NAME:$CANONICAL_TAG"
-          digest="$(image_digest "$IMAGE_NAME:$CANONICAL_TAG")"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          canonical_digest="$(
+            docker buildx imagetools inspect \
+              "$IMAGE_NAME:$CANONICAL_TAG" \
+              --format '{{.Manifest.Digest}}'
+          )"
+          [[ "$canonical_digest" == "$registry_digest" ]]
 
-          docker push "$IMAGE_NAME:$BUILD_TAG"
-          build_digest="$(image_digest "$IMAGE_NAME:$BUILD_TAG")"
-          [[ "$build_digest" == "$digest" ]]
-
-          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$registry_digest" >> "$GITHUB_OUTPUT"
 
       - name: Attest published image
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
