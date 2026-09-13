@@ -331,54 +331,70 @@ watcher_mutation_old_manifest="$test_dir/watcher-mutation-old-supported_version.
 watcher_mutation_old_base_manifest="$test_dir/watcher-mutation-old-supported_bases.json"
 git -C "$watcher_mutation_repo" show HEAD:supported_version.json > "$watcher_mutation_old_manifest"
 git -C "$watcher_mutation_repo" show HEAD:supported_bases.json > "$watcher_mutation_old_base_manifest"
-[[ "$(jq -er '.supported_versions[-1].version' "$watcher_mutation_old_manifest")" == "3.47.3" ]] \
-  || fail 'watcher mutation fixture did not read the historical Flutter version from HEAD'
+cmp -s "$watcher_mutation_old_manifest" "$checked_in_manifest" \
+  || fail 'watcher mutation fixture did not read the checked-in Flutter manifest from HEAD'
+watcher_mutation_old_version="$(jq -er '.supported_versions[-1].version' "$watcher_mutation_old_manifest")"
+watcher_mutation_new_version="$(jq -er '
+  .supported_versions[-1].version
+  | split(".")
+  | "\(.[0]).\(.[1]).\((.[2] | tonumber) + 1)"
+' "$watcher_mutation_old_manifest")"
 
-jq '
+jq --arg new_version "$watcher_mutation_new_version" '
   .supported_versions[-1] = (.supported_versions[-1]
-    | .version = "3.47.4"
+    | .channel as $channel
+    | .version = $new_version
     | .revision = "7777777777777777777777777777777777777777"
-    | .archive = "stable/linux/flutter_linux_3.47.4-stable.tar.xz"
+    | .archive = ($channel + "/linux/flutter_linux_" + $new_version + "-" + $channel + ".tar.xz")
     | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111")
 ' "$watcher_mutation_repo/supported_version.json" > "$test_dir/mutated-supported_version.json"
 mv "$test_dir/mutated-supported_version.json" "$watcher_mutation_repo/supported_version.json"
 git -C "$watcher_mutation_repo" diff --quiet -- supported_version.json \
   && fail 'watcher mutation fixture did not update the working-tree Flutter manifest'
 "$validator" "$watcher_mutation_repo/supported_version.json"
+[[ "$watcher_mutation_new_version" != "$watcher_mutation_old_version" ]] \
+  || fail 'watcher mutation fixture did not advance the historical Flutter version'
 watcher_mutation_matrix="$("$publish_matrix_script" \
   "$watcher_mutation_old_manifest" "$watcher_mutation_repo/supported_version.json" \
   "$watcher_mutation_old_base_manifest" "$watcher_mutation_old_base_manifest")"
-jq -e --argjson expected_base_count "$expected_base_count" '
+jq -e \
+  --argjson expected_base_count "$expected_base_count" \
+  --arg expected_version "$watcher_mutation_new_version" '
   (.include | length == $expected_base_count)
-  and (all(.include[]; .version == "3.47.4"))
+  and (all(.include[]; .version == $expected_version))
   and ([.include[] | [.version, .base_id]] | unique | length == $expected_base_count)
 ' <<< "$watcher_mutation_matrix" >/dev/null \
   || fail 'watcher mutation fixture did not plan the updated Flutter release for every base'
 
 cp "$watcher_mutation_old_manifest" "$watcher_mutation_repo/supported_version.json"
 cp "$checked_in_base_manifest" "$watcher_mutation_repo/supported_bases.json"
+watcher_mutation_old_base_reference="$(jq -er \
+  '.bases[] | select(.id == "ubuntu24.04") | .reference' \
+  "$watcher_mutation_old_base_manifest")"
+watcher_mutation_new_base_reference='ubuntu:24.04@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+if [[ "$watcher_mutation_new_base_reference" == "$watcher_mutation_old_base_reference" ]]; then
+  watcher_mutation_new_base_reference='ubuntu:24.04@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+fi
 jq --arg ref \
-  "ubuntu:24.04@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+  "$watcher_mutation_new_base_reference" \
   '.bases |= map(if .id == "ubuntu24.04" then .reference = $ref else . end)' \
   "$watcher_mutation_repo/supported_bases.json" > "$test_dir/mutated-supported_bases.json"
 mv "$test_dir/mutated-supported_bases.json" "$watcher_mutation_repo/supported_bases.json"
 git -C "$watcher_mutation_repo" diff --quiet -- supported_bases.json \
   && fail 'watcher mutation fixture did not update the working-tree base manifest'
 "$base_validator" "$watcher_mutation_repo/supported_bases.json"
-[[ "$(jq -er '.supported_versions[-1].version' "$watcher_mutation_old_manifest")" == "3.47.3" ]] \
-  || fail 'base watcher mutation changed the historical Flutter fixture'
-[[ "$(jq -er '.bases[] | select(.id == "ubuntu24.04") | .reference' "$watcher_mutation_old_base_manifest")" != \
-   "$(jq -er '.bases[] | select(.id == "ubuntu24.04") | .reference' "$watcher_mutation_repo/supported_bases.json")" ]] \
-  || fail 'base watcher mutation did not change the working-tree base fixture'
-expected_version_count="$(jq -er '.supported_versions | length' "$checked_in_manifest")"
+cmp -s "$watcher_mutation_old_base_manifest" "$checked_in_base_manifest" \
+  || fail 'base watcher mutation fixture did not read the checked-in base manifest from HEAD'
+cmp -s "$watcher_mutation_old_base_manifest" "$watcher_mutation_repo/supported_bases.json" \
+  && fail 'base watcher mutation did not change the working-tree base fixture'
+expected_version_count="$(jq -er '.supported_versions | length' "$watcher_mutation_old_manifest")"
 base_mutation_matrix="$("$publish_matrix_script" \
   "$watcher_mutation_old_manifest" "$watcher_mutation_old_manifest" \
   "$watcher_mutation_old_base_manifest" "$watcher_mutation_repo/supported_bases.json")"
 jq -e \
   --argjson expected_version_count "$expected_version_count" \
   --arg expected_base_id ubuntu24.04 \
-  --arg expected_base_reference \
-    "ubuntu:24.04@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" '
+  --arg expected_base_reference "$watcher_mutation_new_base_reference" '
   (.include | length == $expected_version_count)
   and (all(.include[]; .base_id == $expected_base_id))
   and (all(.include[]; .base_reference == $expected_base_reference))
@@ -940,6 +956,16 @@ patch_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-patc
   <<< "$patch_matrix")" == true ]] \
   || fail 'publish matrix did not cover all four production bases'
 
+watcher_regression_old_manifest="$test_dir/watcher-3.47.3-old.json"
+jq '
+  .supported_versions[-1] = (.supported_versions[-1]
+    | .version = "3.47.3"
+    | .revision = "6666666666666666666666666666666666666666"
+    | .archive = "stable/linux/flutter_linux_3.47.3-stable.tar.xz"
+    | .archive_sha256 = "3333333333333333333333333333333333333333333333333333333333333333")
+' "$publish_base" > "$watcher_regression_old_manifest"
+"$validator" "$watcher_regression_old_manifest"
+
 watcher_patch_manifest="$test_dir/watcher-3.47.4.json"
 jq '
   .supported_versions |= map(
@@ -950,9 +976,9 @@ jq '
       | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
     else . end
   )
-' "$checked_in_manifest" > "$watcher_patch_manifest"
+' "$watcher_regression_old_manifest" > "$watcher_patch_manifest"
 "$validator" "$watcher_patch_manifest"
-watcher_patch_matrix="$("$publish_matrix_script" "$checked_in_manifest" "$watcher_patch_manifest" \
+watcher_patch_matrix="$("$publish_matrix_script" "$watcher_regression_old_manifest" "$watcher_patch_manifest" \
   "$checked_in_base_manifest" "$checked_in_base_manifest")"
 jq -e --argjson expected_base_count "$expected_base_count" '
   (.include | length == $expected_base_count)
@@ -965,7 +991,7 @@ stale_merge_repo="$test_dir/stale-merge-result-repo"
 git init -q "$stale_merge_repo"
 git -C "$stale_merge_repo" config user.name stale-merge-result-test
 git -C "$stale_merge_repo" config user.email stale-merge-result-test@example.invalid
-cp "$checked_in_manifest" "$stale_merge_repo/supported_version.json"
+cp "$watcher_regression_old_manifest" "$stale_merge_repo/supported_version.json"
 jq --arg ref \
   'ubuntu:24.04@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   '.bases |= map(if .id == "ubuntu24.04" then .reference = $ref else . end)' \
@@ -1045,9 +1071,9 @@ jq '
       | .archive_sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
     else . end
   )
-' "$checked_in_manifest" > "$flutter_metadata_manifest"
+' "$watcher_regression_old_manifest" > "$flutter_metadata_manifest"
 "$validator" "$flutter_metadata_manifest"
-flutter_metadata_matrix="$("$publish_matrix_script" "$checked_in_manifest" "$flutter_metadata_manifest" \
+flutter_metadata_matrix="$("$publish_matrix_script" "$watcher_regression_old_manifest" "$flutter_metadata_manifest" \
   "$checked_in_base_manifest" "$checked_in_base_manifest")"
 jq -e --argjson expected_base_count "$expected_base_count" '
   (.include | length == $expected_base_count)
