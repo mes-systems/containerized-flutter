@@ -12,7 +12,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
-      requires_toolchain_ci: ${{ steps.classify.outputs.requires_toolchain_ci }}
+      ci_mode: ${{ steps.matrix.outputs.ci_mode }}
+      build_needed: ${{ steps.matrix.outputs.build_needed }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,18 +37,22 @@ jobs:
           set -euo pipefail
 
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            printf 'requires_toolchain_ci=true\n' >> "$GITHUB_OUTPUT"
+            printf 'ci_mode=full\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           base_sha="$(jq -er '.pull_request.base.sha' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
           head_sha="$(jq -er '.pull_request.head.sha' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
           if [[ ! "$base_sha" =~ ^[[:xdigit:]]{40}$ || ! "$head_sha" =~ ^[[:xdigit:]]{40}$ ]]; then
-            printf 'requires_toolchain_ci=true\n' >> "$GITHUB_OUTPUT"
+            printf 'ci_mode=full\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          git fetch --no-tags origin "$base_sha" "$head_sha" >/dev/null 2>&1 || true
+          if ! git fetch --no-tags origin "$base_sha" "$head_sha"; then
+            printf 'ci_mode=full\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
           scripts/classify-changes.sh --revisions "$base_sha" "$head_sha" \
             >> "$GITHUB_OUTPUT"
 
@@ -56,13 +61,102 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          matrix="$(scripts/build-matrix.sh supported_version.json supported_bases.json)"
+          ci_mode="${{ steps.classify.outputs.ci_mode }}"
+          matrix='{"include":[]}'
+          build_needed=false
+
+          case "$ci_mode" in
+            none)
+              ;;
+            full)
+              matrix="$(scripts/build-matrix.sh supported_version.json supported_bases.json)"
+              build_needed=true
+              ;;
+            selective)
+              temp_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ci-manifests.XXXXXX")"
+              trap 'rm -rf -- "$temp_dir"' EXIT
+              old_versions="$temp_dir/supported_version.json"
+              old_bases="$temp_dir/supported_bases.json"
+              new_versions="$temp_dir/tested-supported_version.json"
+              new_bases="$temp_dir/tested-supported_bases.json"
+              base_sha="${{ steps.classify.outputs.base_sha }}"
+
+              if ! git show "$base_sha:supported_version.json" > "$old_versions" \
+                || ! git show "$base_sha:supported_bases.json" > "$old_bases" \
+                || ! cp supported_version.json "$new_versions" \
+                || ! cp supported_bases.json "$new_bases"; then
+                printf 'could not read PR manifests; falling back to full CI\n' >&2
+                ci_mode=full
+              elif ! scripts/validate-supported-versions.sh "$old_versions" \
+                || ! scripts/validate-supported-bases.sh --allow-multiple "$old_bases" \
+                || ! scripts/validate-supported-versions.sh "$new_versions" \
+                || ! scripts/validate-supported-bases.sh "$new_bases"; then
+                printf 'could not validate PR manifests; falling back to full CI\n' >&2
+                ci_mode=full
+              else
+                if ! matrix="$(scripts/publish-matrix.sh \
+                  "$old_versions" "$new_versions" \
+                  "$old_bases" "$new_bases")"; then
+                  printf 'could not plan selective CI; falling back to full CI\n' >&2
+                  ci_mode=full
+                elif ! jq -e '.include | type == "array"' <<< "$matrix" >/dev/null; then
+                  printf 'selective CI planner returned a malformed matrix; falling back to full CI\n' >&2
+                  ci_mode=full
+                elif ! jq -e \
+                  --slurpfile versions "$new_versions" \
+                  --slurpfile bases "$new_bases" '
+                    (.include | type == "array")
+                    and all(
+                      .include[];
+                      . as $row
+                      | any(
+                          $versions[0].supported_versions[];
+                          .version == $row.version
+                          and .channel == $row.channel
+                          and .revision == $row.revision
+                          and .archive == $row.archive
+                          and .archive_sha256 == $row.archive_sha256
+                        )
+                      and any(
+                          $bases[0].bases[];
+                          .id == $row.base_id
+                          and .family == $row.base_family
+                          and .version == $row.base_version
+                          and .variant == $row.base_variant
+                          and .reference == $row.base_reference
+                        )
+                    )
+                  ' <<< "$matrix" >/dev/null; then
+                  printf 'selective CI matrix is inconsistent with the tested manifests; falling back to full CI\n' >&2
+                  ci_mode=full
+                elif [[ "$(jq -r '.include | length' <<< "$matrix")" == 0 ]]; then
+                  printf 'selective CI planner returned an unexpected empty matrix\n' >&2
+                  exit 1
+                else
+                  build_needed=true
+                fi
+              fi
+
+              if [[ "$ci_mode" == full ]]; then
+                matrix="$(scripts/build-matrix.sh supported_version.json supported_bases.json)"
+                build_needed=true
+              fi
+              ;;
+            *)
+              printf 'invalid CI mode from classifier: %s\n' "$ci_mode" >&2
+              exit 1
+              ;;
+          esac
+
+          jq -e '.include | type == "array"' <<< "$matrix" >/dev/null
+          printf 'ci_mode=%s\n' "$ci_mode" >> "$GITHUB_OUTPUT"
+          printf 'build_needed=%s\n' "$build_needed" >> "$GITHUB_OUTPUT"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   build:
     name: build (${{ matrix.version }}, ${{ matrix.base_id }})
     needs: manifest
-    if: needs.manifest.outputs.requires_toolchain_ci == 'true'
+    if: needs.manifest.outputs.ci_mode != 'none'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -256,7 +350,9 @@ jobs:
         env:
           MANIFEST_RESULT: ${{ needs.manifest.result }}
           BUILD_RESULT: ${{ needs.build.result }}
-          REQUIRES_TOOLCHAIN_CI: ${{ needs.manifest.outputs.requires_toolchain_ci }}
+          CI_MODE: ${{ needs.manifest.outputs.ci_mode }}
+          BUILD_NEEDED: ${{ needs.manifest.outputs.build_needed }}
+          MATRIX: ${{ needs.manifest.outputs.matrix }}
         run: |
           set -euo pipefail
 
@@ -265,21 +361,49 @@ jobs:
             exit 1
           }
 
-          case "$REQUIRES_TOOLCHAIN_CI" in
-            true)
+          [[ "$BUILD_NEEDED" == true || "$BUILD_NEEDED" == false ]] || {
+            printf 'invalid build-needed output: %s\n' "$BUILD_NEEDED" >&2
+            exit 1
+          }
+          jq -e '.include | type == "array"' <<< "$MATRIX" >/dev/null || {
+            printf 'missing or malformed build matrix\n' >&2
+            exit 1
+          }
+          matrix_count="$(jq -r '.include | length' <<< "$MATRIX")"
+
+          case "$CI_MODE" in
+            full)
+              [[ "$BUILD_NEEDED" == true && "$matrix_count" -gt 0 ]] || {
+                printf 'full CI had no build matrix\n' >&2
+                exit 1
+              }
               [[ "$BUILD_RESULT" == "success" ]] || {
-                printf 'required toolchain CI result was %s\n' "$BUILD_RESULT" >&2
+                printf 'full CI result was %s\n' "$BUILD_RESULT" >&2
                 exit 1
               }
               ;;
-            false)
+            selective)
+              [[ "$BUILD_NEEDED" == true && "$matrix_count" -gt 0 ]] || {
+                printf 'selective CI had no build matrix\n' >&2
+                exit 1
+              }
+              [[ "$BUILD_RESULT" == "success" ]] || {
+                printf 'selective CI result was %s\n' "$BUILD_RESULT" >&2
+                exit 1
+              }
+              ;;
+            none)
+              [[ "$BUILD_NEEDED" == false && "$matrix_count" == 0 ]] || {
+                printf 'none CI had an unexpected build matrix\n' >&2
+                exit 1
+              }
               [[ "$BUILD_RESULT" == "skipped" ]] || {
-                printf 'unexpected skipped-matrix result: %s\n' "$BUILD_RESULT" >&2
+                printf 'none CI result was %s\n' "$BUILD_RESULT" >&2
                 exit 1
               }
               ;;
             *)
-              printf 'invalid toolchain CI classification: %s\n' "$REQUIRES_TOOLCHAIN_CI" >&2
+              printf 'invalid CI mode: %s\n' "$CI_MODE" >&2
               exit 1
               ;;
           esac

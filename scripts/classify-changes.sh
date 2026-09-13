@@ -2,22 +2,40 @@
 set -euo pipefail
 
 fail_safe() {
-  printf 'requires_toolchain_ci=true\n'
+  printf 'ci_mode=full\n'
 }
 
-is_harmless_path() {
+classify_path() {
   case "$1" in
+    supported_version.json|supported_bases.json)
+      printf 'selective\n'
+      ;;
     README.md|LICENSE|SECURITY.md|.gitignore|.github/dependabot.yml|docs/*)
-      return 0
+      printf 'none\n'
       ;;
     *)
-      return 1
+      printf 'full\n'
+      ;;
+  esac
+}
+
+merge_mode() {
+  case "$1:$2" in
+    full:*|*:full)
+      printf 'full\n'
+      ;;
+    selective:*|*:selective)
+      printf 'selective\n'
+      ;;
+    *)
+      printf 'none\n'
       ;;
   esac
 }
 
 classify_paths() {
   local path
+  local mode=none
 
   if (( $# == 0 )); then
     fail_safe
@@ -25,15 +43,16 @@ classify_paths() {
   fi
 
   for path in "$@"; do
-    is_harmless_path "$path" || { fail_safe; return; }
+    mode="$(merge_mode "$mode" "$(classify_path "$path")")"
   done
 
-  printf 'requires_toolchain_ci=false\n'
+  printf 'ci_mode=%s\n' "$mode"
 }
 
 classify_revisions() {
   local base="$1"
   local head="$2"
+  local merge_base
   local diff_file
   local path_count=0
 
@@ -42,29 +61,36 @@ classify_revisions() {
   git rev-parse --verify "${base}^{commit}" >/dev/null 2>&1 || { fail_safe; return; }
   git rev-parse --verify "${head}^{commit}" >/dev/null 2>&1 || { fail_safe; return; }
 
+  if ! merge_base="$(git merge-base "$base" "$head")"; then
+    fail_safe
+    return
+  fi
+  if [[ ! "$merge_base" =~ ^[[:xdigit:]]{40}$ ]] \
+    || ! git rev-parse --verify "${merge_base}^{commit}" >/dev/null 2>&1; then
+    fail_safe
+    return
+  fi
+
   if ! diff_file="$(mktemp "${TMPDIR:-/tmp}/classify-changes.XXXXXX")"; then
     fail_safe
     return
   fi
-  if ! git diff --name-only --no-renames -z "$base" "$head" -- > "$diff_file"; then
+  if ! git diff --name-only --no-renames -z "$merge_base" "$head" -- > "$diff_file"; then
     rm -f -- "$diff_file"
     fail_safe
     return
   fi
 
   local path
+  local mode=none
   while IFS= read -r -d '' path; do
     path_count=$((path_count + 1))
-    if ! is_harmless_path "$path"; then
-      rm -f -- "$diff_file"
-      fail_safe
-      return
-    fi
+    mode="$(merge_mode "$mode" "$(classify_path "$path")")"
   done < "$diff_file"
   rm -f -- "$diff_file"
   (( path_count > 0 )) || { fail_safe; return; }
 
-  printf 'requires_toolchain_ci=false\n'
+  printf 'ci_mode=%s\n' "$mode"
 }
 
 if (( $# == 0 )); then

@@ -7,6 +7,7 @@ if (( $# != 4 )); then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared affected-pair planner for publication and manifest-scoped PR CI.
 old_flutter="$1"
 new_flutter="$2"
 old_bases="$3"

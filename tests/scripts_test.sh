@@ -95,6 +95,40 @@ assert_matrix_matches_manifests() {
     || fail "$label build matrix does not match its manifests"
 }
 
+assert_matrix_rows_match_manifests() {
+  local matrix="$1"
+  local versions="$2"
+  local bases="$3"
+  local label="$4"
+
+  jq -e \
+    --slurpfile versions "$versions" \
+    --slurpfile bases "$bases" '
+      (.include | type == "array")
+      and all(
+        .include[];
+        . as $row
+        | any(
+            $versions[0].supported_versions[];
+            .version == $row.version
+            and .channel == $row.channel
+            and .revision == $row.revision
+            and .archive == $row.archive
+            and .archive_sha256 == $row.archive_sha256
+          )
+        and any(
+            $bases[0].bases[];
+            .id == $row.base_id
+            and .family == $row.base_family
+            and .version == $row.base_version
+            and .variant == $row.base_variant
+            and .reference == $row.base_reference
+          )
+      )
+    ' <<< "$matrix" >/dev/null \
+    || fail "$label matrix rows do not match its manifests"
+}
+
 assert_metadata_matches_base_manifest() {
   local flutter_version="$1"
   local repository_sha="$2"
@@ -187,8 +221,8 @@ assert_classification() {
   shift
   local actual
   actual="$("$classifier" "$@")"
-  [[ "$actual" == "requires_toolchain_ci=$expected" ]] \
-    || fail "expected requires_toolchain_ci=$expected, got: $actual"
+  [[ "$actual" == "ci_mode=$expected" ]] \
+    || fail "expected ci_mode=$expected, got: $actual"
 }
 
 assert_publication_mode() {
@@ -200,17 +234,19 @@ assert_publication_mode() {
     || fail "expected publish_mode=$expected, got: $actual"
 }
 
-assert_classification false README.md
-assert_classification false README.md SECURITY.md
-assert_classification false docs/maintenance.md
-assert_classification true README.md Dockerfile
-assert_classification true README.md supported_version.json
-assert_classification true README.md scripts/verify-release.sh
-assert_classification true README.md tests/smoke_app/test/smoke_test.dart
-assert_classification true some-new-future-file
-assert_classification true
-assert_classification true --revisions not-a-base not-a-head
-assert_classification true \
+assert_classification none README.md
+assert_classification none README.md SECURITY.md
+assert_classification none docs/maintenance.md
+assert_classification full README.md Dockerfile
+assert_classification selective README.md supported_version.json
+assert_classification selective supported_bases.json
+assert_classification selective supported_version.json supported_bases.json README.md
+assert_classification full README.md scripts/verify-release.sh
+assert_classification full README.md tests/smoke_app/test/smoke_test.dart
+assert_classification full some-new-future-file
+assert_classification full
+assert_classification full --revisions not-a-base not-a-head
+assert_classification full \
   README.md \
   scripts/validate-supported-bases.sh \
   supported_bases.json \
@@ -450,7 +486,7 @@ git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add harmless
 fixture_docs_head="$(git -C "$fixture_repo" rev-parse HEAD)"
 fixture_docs_result="$(cd "$fixture_repo" && "$classifier" --revisions \
   "$fixture_base" "$fixture_docs_head")"
-[[ "$fixture_docs_result" == 'requires_toolchain_ci=false' ]] \
+[[ "$fixture_docs_result" == 'ci_mode=none' ]] \
   || fail "expected harmless revision range to skip toolchain CI, got: $fixture_docs_result"
 printf 'FROM ubuntu:24.04\n' > "$fixture_repo/Dockerfile"
 git -C "$fixture_repo" add Dockerfile
@@ -458,8 +494,85 @@ git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: add toolchai
 fixture_toolchain_head="$(git -C "$fixture_repo" rev-parse HEAD)"
 fixture_toolchain_result="$(cd "$fixture_repo" && "$classifier" --revisions \
   "$fixture_base" "$fixture_toolchain_head")"
-[[ "$fixture_toolchain_result" == 'requires_toolchain_ci=true' ]] \
+[[ "$fixture_toolchain_result" == 'ci_mode=full' ]] \
   || fail "expected toolchain revision range to require CI, got: $fixture_toolchain_result"
+
+history_repo="$test_dir/classification-history-repo"
+git init -q "$history_repo"
+git -C "$history_repo" config user.name classification-history-test
+git -C "$history_repo" config user.email classification-history-test@example.invalid
+mkdir -p "$history_repo/scripts"
+printf 'baseline\n' > "$history_repo/README.md"
+printf 'baseline\n' > "$history_repo/supported_version.json"
+printf 'baseline\n' > "$history_repo/scripts/verify-release.sh"
+printf 'baseline\n' > "$history_repo/Dockerfile"
+git -C "$history_repo" add .
+git -C "$history_repo" -c commit.gpgsign=false commit -qm 'fixture: classification common ancestor'
+history_common="$(git -C "$history_repo" rev-parse HEAD)"
+
+git -C "$history_repo" checkout -q -b pr-selective "$history_common"
+printf 'PR Flutter manifest update\n' > "$history_repo/supported_version.json"
+git -C "$history_repo" add supported_version.json
+git -C "$history_repo" -c commit.gpgsign=false commit -qm 'fixture: PR selective manifest change'
+pr_selective_head="$(git -C "$history_repo" rev-parse HEAD)"
+
+git -C "$history_repo" checkout -q -b main-selective "$history_common"
+printf 'main-only verification change\n' > "$history_repo/scripts/verify-release.sh"
+git -C "$history_repo" add scripts/verify-release.sh
+git -C "$history_repo" -c commit.gpgsign=false commit -qm 'fixture: unrelated main verification change'
+main_selective_head="$(git -C "$history_repo" rev-parse HEAD)"
+two_dot_paths="$(git -C "$history_repo" diff --name-only --no-renames \
+  "$main_selective_head" "$pr_selective_head")"
+assert_contains 'scripts/verify-release.sh' "$two_dot_paths"
+history_selective_result="$(cd "$history_repo" && "$classifier" --revisions \
+  "$main_selective_head" "$pr_selective_head")"
+[[ "$history_selective_result" == 'ci_mode=selective' ]] \
+  || fail "unrelated main-only build change promoted selective PR: $history_selective_result"
+
+git -C "$history_repo" checkout -q -b pr-docs "$history_common"
+printf 'PR documentation update\n' > "$history_repo/README.md"
+git -C "$history_repo" add README.md
+git -C "$history_repo" -c commit.gpgsign=false commit -qm 'fixture: PR documentation change'
+pr_docs_head="$(git -C "$history_repo" rev-parse HEAD)"
+
+git -C "$history_repo" checkout -q -b main-docs "$history_common"
+printf 'main-only Dockerfile change\n' > "$history_repo/Dockerfile"
+git -C "$history_repo" add Dockerfile
+git -C "$history_repo" -c commit.gpgsign=false commit -qm 'fixture: unrelated main Dockerfile change'
+main_docs_head="$(git -C "$history_repo" rev-parse HEAD)"
+history_docs_result="$(cd "$history_repo" && "$classifier" --revisions \
+  "$main_docs_head" "$pr_docs_head")"
+[[ "$history_docs_result" == 'ci_mode=none' ]] \
+  || fail "unrelated main-only Dockerfile change promoted docs PR: $history_docs_result"
+
+git -C "$history_repo" checkout -q -b pr-full "$history_common"
+printf 'PR Flutter manifest and verification update\n' > "$history_repo/supported_version.json"
+printf 'PR verification change\n' > "$history_repo/scripts/verify-release.sh"
+git -C "$history_repo" add supported_version.json scripts/verify-release.sh
+git -C "$history_repo" -c commit.gpgsign=false commit -qm 'fixture: PR full CI change'
+pr_full_head="$(git -C "$history_repo" rev-parse HEAD)"
+history_full_result="$(cd "$history_repo" && "$classifier" --revisions \
+  "$history_common" "$pr_full_head")"
+[[ "$history_full_result" == 'ci_mode=full' ]] \
+  || fail "PR-owned build change did not require full CI: $history_full_result"
+
+unrelated_history_repo="$test_dir/no-common-history-repo"
+git init -q "$unrelated_history_repo"
+git -C "$unrelated_history_repo" config user.name no-common-history-test
+git -C "$unrelated_history_repo" config user.email no-common-history-test@example.invalid
+printf 'root A\n' > "$unrelated_history_repo/a.txt"
+git -C "$unrelated_history_repo" add a.txt
+git -C "$unrelated_history_repo" -c commit.gpgsign=false commit -qm 'fixture: unrelated root A'
+unrelated_history_base="$(git -C "$unrelated_history_repo" rev-parse HEAD)"
+git -C "$unrelated_history_repo" checkout -q --orphan root-b
+printf 'root B\n' > "$unrelated_history_repo/b.txt"
+git -C "$unrelated_history_repo" add b.txt
+git -C "$unrelated_history_repo" -c commit.gpgsign=false commit -qm 'fixture: unrelated root B'
+unrelated_history_head="$(git -C "$unrelated_history_repo" rev-parse HEAD)"
+unrelated_history_result="$(cd "$unrelated_history_repo" && "$classifier" --revisions \
+  "$unrelated_history_base" "$unrelated_history_head")"
+[[ "$unrelated_history_result" == 'ci_mode=full' ]] \
+  || fail "merge-base failure did not fail safe: $unrelated_history_result"
 
 fixture_dockerfile_plan="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
   "$fixture_docs_head" "$fixture_toolchain_head" "$manifest" "$base_manifest")"
@@ -510,7 +623,7 @@ git -C "$fixture_repo" -c commit.gpgsign=false commit -qm 'fixture: merge-6 main
 fixture_maintenance_head="$(git -C "$fixture_repo" rev-parse HEAD)"
 fixture_maintenance_ci="$(cd "$fixture_repo" && "$classifier" --revisions \
   "$fixture_metadata_head" "$fixture_maintenance_head")"
-[[ "$fixture_maintenance_ci" == 'requires_toolchain_ci=true' ]] \
+[[ "$fixture_maintenance_ci" == 'ci_mode=full' ]] \
   || fail "merge-6 maintenance fixture did not require toolchain CI: $fixture_maintenance_ci"
 fixture_maintenance_publish="$(cd "$fixture_repo" && "$publication_classifier" --revisions \
   "$fixture_metadata_head" "$fixture_maintenance_head")"
@@ -561,7 +674,7 @@ jq -e '
   || fail 'three-base to four-base migration did not plan Ubuntu 26.04 rows'
 migration_ci="$(cd "$migration_repo" && "$classifier" --revisions \
   "$migration_base" "$migration_head")"
-[[ "$migration_ci" == 'requires_toolchain_ci=true' ]] \
+[[ "$migration_ci" == 'ci_mode=full' ]] \
   || fail "manifest plus validator migration did not require full CI: $migration_ci"
 
 control_plane_repo="$test_dir/control-plane-repo"
@@ -585,7 +698,7 @@ git -C "$control_plane_repo" -c commit.gpgsign=false commit -qm 'fixture: contro
 control_plane_head="$(git -C "$control_plane_repo" rev-parse HEAD)"
 control_plane_ci="$(cd "$control_plane_repo" && "$classifier" --revisions \
   "$control_plane_base" "$control_plane_head")"
-[[ "$control_plane_ci" == 'requires_toolchain_ci=true' ]] \
+[[ "$control_plane_ci" == 'ci_mode=full' ]] \
   || fail "control-plane-only revision range did not require full CI: $control_plane_ci"
 control_plane_plan="$(cd "$control_plane_repo" && "$publication_classifier" --revisions \
   "$control_plane_base" "$control_plane_head" supported_version.json supported_bases.json)"
@@ -744,6 +857,118 @@ patch_matrix="$("$publish_matrix_script" "$publish_base" "$test_dir/publish-patc
 [[ "$(jq -er '[.include[].base_id] | sort == ["debian13", "debian13-slim", "ubuntu24.04", "ubuntu26.04"]' \
   <<< "$patch_matrix")" == true ]] \
   || fail 'publish matrix did not cover all four production bases'
+
+watcher_patch_manifest="$test_dir/watcher-3.47.4.json"
+jq '
+  .supported_versions |= map(
+    if .version == "3.47.3" then
+      .version = "3.47.4"
+      | .revision = "7777777777777777777777777777777777777777"
+      | .archive = "stable/linux/flutter_linux_3.47.4-stable.tar.xz"
+      | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+    else . end
+  )
+' "$manifest" > "$watcher_patch_manifest"
+"$validator" "$watcher_patch_manifest"
+watcher_patch_matrix="$("$publish_matrix_script" "$manifest" "$watcher_patch_manifest" \
+  "$base_manifest" "$base_manifest")"
+jq -e '
+  (.include | length == 4)
+  and (all(.include[]; .version == "3.47.4"))
+  and ([.include[] | [.version, .base_id]] | unique | length == 4)
+' <<< "$watcher_patch_matrix" >/dev/null \
+  || fail '3.47.3 to 3.47.4 watcher update did not plan exactly four replacement rows'
+
+stale_merge_repo="$test_dir/stale-merge-result-repo"
+git init -q "$stale_merge_repo"
+git -C "$stale_merge_repo" config user.name stale-merge-result-test
+git -C "$stale_merge_repo" config user.email stale-merge-result-test@example.invalid
+cp "$manifest" "$stale_merge_repo/supported_version.json"
+jq --arg ref \
+  'ubuntu:24.04@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  '.bases |= map(if .id == "ubuntu24.04" then .reference = $ref else . end)' \
+  "$base_manifest" > "$stale_merge_repo/supported_bases.json"
+printf 'stale merge result fixture\n' > "$stale_merge_repo/README.md"
+git -C "$stale_merge_repo" add supported_version.json supported_bases.json README.md
+git -C "$stale_merge_repo" -c commit.gpgsign=false commit -qm 'fixture: stale watcher common ancestor'
+stale_merge_common="$(git -C "$stale_merge_repo" rev-parse HEAD)"
+
+git -C "$stale_merge_repo" checkout -q -b stale-pr "$stale_merge_common"
+jq '
+  .supported_versions |= map(
+    if .version == "3.47.3" then
+      .version = "3.47.4"
+      | .revision = "7777777777777777777777777777777777777777"
+      | .archive = "stable/linux/flutter_linux_3.47.4-stable.tar.xz"
+      | .archive_sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+    else . end
+  )
+' "$stale_merge_repo/supported_version.json" > "$test_dir/stale-pr-versions.json"
+mv "$test_dir/stale-pr-versions.json" "$stale_merge_repo/supported_version.json"
+"$validator" "$stale_merge_repo/supported_version.json"
+git -C "$stale_merge_repo" add supported_version.json
+git -C "$stale_merge_repo" -c commit.gpgsign=false commit -qm 'fixture: stale watcher Flutter update'
+stale_merge_pr_head="$(git -C "$stale_merge_repo" rev-parse HEAD)"
+
+git -C "$stale_merge_repo" checkout -q -b stale-main "$stale_merge_common"
+jq --arg ref \
+  'ubuntu:24.04@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  '.bases |= map(if .id == "ubuntu24.04" then .reference = $ref else . end)' \
+  "$stale_merge_repo/supported_bases.json" > "$test_dir/stale-main-bases.json"
+mv "$test_dir/stale-main-bases.json" "$stale_merge_repo/supported_bases.json"
+"$base_validator" "$stale_merge_repo/supported_bases.json"
+git -C "$stale_merge_repo" add supported_bases.json
+git -C "$stale_merge_repo" -c commit.gpgsign=false commit -qm 'fixture: current main base digest update'
+stale_merge_main_head="$(git -C "$stale_merge_repo" rev-parse HEAD)"
+git -C "$stale_merge_repo" -c commit.gpgsign=false merge --no-ff --no-edit stale-pr >/dev/null
+stale_merge_result="$(git -C "$stale_merge_repo" rev-parse HEAD)"
+[[ -n "$stale_merge_result" && "$stale_merge_result" != "$stale_merge_main_head" ]] \
+  || fail 'stale watcher fixture did not create a merge result'
+
+stale_old_versions="$test_dir/stale-old-supported_version.json"
+stale_old_bases="$test_dir/stale-old-supported_bases.json"
+stale_new_versions="$test_dir/stale-tested-supported_version.json"
+stale_new_bases="$test_dir/stale-tested-supported_bases.json"
+git -C "$stale_merge_repo" show "$stale_merge_main_head:supported_version.json" > "$stale_old_versions"
+git -C "$stale_merge_repo" show "$stale_merge_main_head:supported_bases.json" > "$stale_old_bases"
+cp "$stale_merge_repo/supported_version.json" "$stale_new_versions"
+cp "$stale_merge_repo/supported_bases.json" "$stale_new_bases"
+stale_merge_matrix="$("$publish_matrix_script" \
+  "$stale_old_versions" "$stale_new_versions" \
+  "$stale_old_bases" "$stale_new_bases")"
+jq -e '
+  (.include | length == 4)
+  and (all(.include[]; .version == "3.47.4"))
+  and ([.include[] | [.version, .base_id]] | unique | length == 4)
+  and ([.include[] | select(.base_id == "ubuntu24.04"
+      and .base_reference == "ubuntu:24.04@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
+      | length == 1)
+  and (all(.include[]; (.base_reference | contains("aaaaaaaa")) | not))
+' <<< "$stale_merge_matrix" >/dev/null \
+  || fail 'stale watcher merge-result matrix used the wrong Flutter/base state'
+assert_matrix_rows_match_manifests \
+  "$stale_merge_matrix" \
+  "$stale_new_versions" \
+  "$stale_new_bases" \
+  'stale watcher merge-result'
+
+flutter_metadata_manifest="$test_dir/flutter-metadata-update.json"
+jq '
+  .supported_versions |= map(
+    if .version == "3.47.3" then
+      .revision = "8888888888888888888888888888888888888888"
+      | .archive_sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+    else . end
+  )
+' "$manifest" > "$flutter_metadata_manifest"
+"$validator" "$flutter_metadata_manifest"
+flutter_metadata_matrix="$("$publish_matrix_script" "$manifest" "$flutter_metadata_manifest" \
+  "$base_manifest" "$base_manifest")"
+jq -e '
+  (.include | length == 4)
+  and (all(.include[]; .version == "3.47.3"))
+' <<< "$flutter_metadata_matrix" >/dev/null \
+  || fail 'Flutter metadata-only update did not plan that version across all bases'
 
 jq '.supported_versions += [{
   "version": "2.1.0",
@@ -961,7 +1186,8 @@ assert_contains 'optional Flutter attestation bundle unavailable' "$acquire_sour
 publish_source="$(sed -n '1,400p' "$ROOT_DIR/.github/workflows/publish.yml")"
 publish_cleanup_source="$(sed -n '/^      - name: Remove tested image/,$p' <<< "$publish_source")"
 publication_source="$(sed -n '1,280p' "$publication_classifier")"
-ci_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/ci.yml")"
+ci_source="$(sed -n '1,400p' "$ROOT_DIR/.github/workflows/ci.yml")"
+classifier_source="$(sed -n '1,180p' "$classifier")"
 expected_build_arg_keys="$(
   printf '%s\n' \
     BASE_IMAGE \
@@ -1184,6 +1410,12 @@ ci_metadata_source="$(sed -n '/^      - name: Derive image metadata/,/^      - n
 assert_contains 'scripts/classify-changes.sh --revisions' "$ci_source"
 assert_contains 'scripts/validate-supported-bases.sh supported_bases.json' "$ci_source"
 assert_contains 'scripts/build-matrix.sh supported_version.json supported_bases.json' "$ci_source"
+assert_contains 'scripts/publish-matrix.sh' "$ci_source"
+assert_contains 'ci_mode' "$ci_source"
+assert_contains 'build_needed' "$ci_source"
+assert_contains '            none)' "$ci_source"
+assert_contains '            selective)' "$ci_source"
+assert_contains 'ci_mode=full' "$ci_source"
 assert_contains 'matrix.base_reference' "$ci_source"
 assert_contains 'BASE_IMAGE=${{ matrix.base_reference }}' "$ci_source"
 assert_contains 'cache-from: type=gha,scope=flutter-${{ matrix.version }}-${{ matrix.base_id }}' "$ci_source"
@@ -1192,15 +1424,33 @@ assert_no_text_match 'ubuntu:24\.04' "$ci_source"
 assert_no_text_match 'image-metadata\.sh.*Dockerfile' "$ci_source"
 assert_contains '.pull_request.base.sha' "$ci_source"
 assert_contains '.pull_request.head.sha' "$ci_source"
-assert_contains 'if: needs.manifest.outputs.requires_toolchain_ci == '\''true'\''' "$ci_source"
+assert_contains 'git show "$base_sha:supported_version.json"' "$ci_source"
+assert_contains 'cp supported_version.json "$new_versions"' "$ci_source"
+assert_contains 'cp supported_bases.json "$new_bases"' "$ci_source"
+assert_no_text_match 'git show "\$head_sha:supported_version\.json"|git show "\$head_sha:supported_bases\.json"' \
+  "$ci_source"
+assert_contains 'selective CI matrix is inconsistent with the tested manifests' "$ci_source"
+assert_contains 'scripts/validate-supported-bases.sh --allow-multiple "$old_bases"' "$ci_source"
+assert_contains 'falling back to full CI' "$ci_source"
+assert_contains 'unexpected empty matrix' "$ci_source"
+assert_contains "if: needs.manifest.outputs.ci_mode != 'none'" "$ci_source"
 assert_contains 'name: build (${{ matrix.version }}, ${{ matrix.base_id }})' "$ci_source"
 assert_contains 'name: CI gate' "$ci_source"
 assert_contains 'if: always()' "$ci_source"
+assert_contains 'CI_MODE: ${{ needs.manifest.outputs.ci_mode }}' "$ci_source"
+assert_contains 'BUILD_RESULT: ${{ needs.build.result }}' "$ci_source"
+assert_contains 'BUILD_NEEDED: ${{ needs.manifest.outputs.build_needed }}' "$ci_source"
+assert_contains 'MATRIX: ${{ needs.manifest.outputs.matrix }}' "$ci_source"
 assert_contains 'run: |' "$ci_metadata_source"
 assert_contains 'test image leaked after cleanup' "$ci_cleanup_source"
 assert_no_text_match '\|\| true' "$ci_cleanup_source"
 assert_no_text_match 'ref:.*pull_request\.head\.sha' "$ci_source"
 assert_no_text_match 'paths-ignore:' "$ci_source"
+assert_no_text_match 'requires_toolchain_ci' "$ci_source"
+assert_contains 'git merge-base "$base" "$head"' "$classifier_source"
+assert_contains 'git diff --name-only --no-renames -z "$merge_base" "$head" --' "$classifier_source"
+assert_no_text_match 'git diff --name-only --no-renames -z "\$base" "\$head" --' \
+  "$classifier_source"
 
 assert_contains 'scripts/classify-publication.sh' "$publish_source"
 assert_contains 'name: publish (${{ matrix.version }}, ${{ matrix.base_id }})' "$publish_source"
@@ -1248,10 +1498,15 @@ assert_contains 'SBOM format: SPDX' "$readme_source"
 assert_contains "--format '{{json .Provenance.SLSA}}'" "$readme_source"
 assert_contains "--format '{{json .SBOM.SPDX}}'" "$readme_source"
 assert_contains 'exact published artifact => exact OCI digest' "$readme_source"
+assert_contains 'creates its proposal commit through GitHub' "$readme_source"
+assert_contains 'GitHub signs' "$readme_source"
+assert_contains 'no persistent commit-signing private key' "$readme_source"
+assert_contains 'changes use the affected image matrix' "$readme_source"
+assert_contains 'Manual CI dispatch always runs the full matrix' "$readme_source"
 assert_no_text_match 'SLSA Level 3|fully SLSA compliant|end-to-end SLSA|fully reproducible' \
   "$readme_source"
 
-watcher_source="$(sed -n '1,320p' "$ROOT_DIR/.github/workflows/flutter-release-watch.yml")"
+watcher_source="$(sed -n '1,360p' "$ROOT_DIR/.github/workflows/flutter-release-watch.yml")"
 assert_contains 'cron: "17 3 * * *"' "$watcher_source"
 assert_contains 'automation/flutter-support-update' "$watcher_source"
 assert_contains 'releases_linux.json' "$watcher_source"
@@ -1261,10 +1516,35 @@ assert_contains 'name: flutter-release-watcher' "$watcher_source"
 assert_contains 'deployment: false' "$watcher_source"
 assert_contains 'client-id: ${{ vars.FLUTTER_WATCHER_CLIENT_ID }}' "$watcher_source"
 assert_contains 'private-key: ${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}' "$watcher_source"
-assert_contains 'steps.app-token.outputs.app-slug' "$watcher_source"
-assert_contains 'gh api "/users/${APP_SLUG}[bot]" --jq .id' "$watcher_source"
-assert_contains 'git config user.name "${APP_SLUG}[bot]"' "$watcher_source"
-assert_contains 'git config user.email "${BOT_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"' "$watcher_source"
+assert_contains 'name: Create and verify GitHub-signed watcher commit' "$watcher_source"
+assert_contains 'git rev-parse --verify '\''refs/remotes/origin/main^{commit}'\''' "$watcher_source"
+assert_contains 'automation/tmp/flutter-support-update-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' "$watcher_source"
+assert_contains 'gh api graphql --input -' "$watcher_source"
+assert_contains 'CreateCommitOnBranchInput!' "$watcher_source"
+assert_contains 'createCommitOnBranch' "$watcher_source"
+assert_contains 'expectedHeadOid' "$watcher_source"
+assert_contains 'supported_version.json", contents: $version_contents' "$watcher_source"
+assert_contains 'README.md", contents: $readme_contents' "$watcher_source"
+assert_contains 'version_contents="$(base64 < supported_version.json' "$watcher_source"
+assert_contains 'readme_contents="$(base64 < README.md' "$watcher_source"
+assert_contains 'repos/$GITHUB_REPOSITORY/commits/$commit_oid' "$watcher_source"
+assert_contains '.commit.verification.verified == true' "$watcher_source"
+assert_contains 'GitHub watcher commit was not verified; refusing branch update' "$watcher_source"
+assert_contains 'current_remote="$(gh api' "$watcher_source"
+assert_contains 'UpdateRefsInput!' "$watcher_source"
+assert_contains 'updateRefs' "$watcher_source"
+assert_contains 'beforeOid: $before_oid' "$watcher_source"
+assert_contains 'repositoryId: $repository_id' "$watcher_source"
+assert_contains 'force: true' "$watcher_source"
+assert_contains 'before_oid=0000000000000000000000000000000000000000' "$watcher_source"
+assert_contains 'GitHub rejected the guarded watcher branch update' "$watcher_source"
+assert_contains 'gh api --method DELETE' "$watcher_source"
+assert_contains 'watcher branch tree matches but its head is not verified; recreating it' "$watcher_source"
+assert_contains 'existing_details="$(gh api' "$watcher_source"
+assert_before '.commit.verification.verified == true' 'updateRefs' "$watcher_source"
+assert_before 'GitHub watcher commit was not verified; refusing branch update' 'updateRefs' "$watcher_source"
+assert_no_text_match 'git commit|git add|git push|git config user\.(name|email)|bot-user|APP_SLUG|BOT_USER_ID' \
+  "$watcher_source"
 assert_contains 'security_anomaly' "$watcher_source"
 assert_contains 'Configure it for the `main` branch/ref with no required reviewer' "$(< "$ROOT_DIR/README.md")"
 assert_no_text_match 'secrets\.FLUTTER_WATCHER_(APP|CLIENT)_ID|app-id:|peter-evans|create-pull-request|github-actions-create-pr|secrets\.PAT|secrets\.GH_TOKEN' \
@@ -1288,7 +1568,35 @@ assert_contains 'private-key: ${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}' "$base
 assert_contains 'git fetch --no-tags origin main' "$base_watcher_source"
 assert_contains 'automation/base-image-update' "$base_watcher_source"
 assert_contains 'git checkout -B "$WATCHER_BRANCH" origin/main' "$base_watcher_source"
-assert_contains 'steps.app-token.outputs.app-slug' "$base_watcher_source"
+assert_contains 'name: Create and verify GitHub-signed watcher commit' "$base_watcher_source"
+assert_contains 'git rev-parse --verify '\''refs/remotes/origin/main^{commit}'\''' "$base_watcher_source"
+assert_contains 'automation/tmp/base-image-update-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' "$base_watcher_source"
+assert_contains 'gh api graphql --input -' "$base_watcher_source"
+assert_contains 'CreateCommitOnBranchInput!' "$base_watcher_source"
+assert_contains 'createCommitOnBranch' "$base_watcher_source"
+assert_contains 'expectedHeadOid' "$base_watcher_source"
+assert_contains 'supported_bases.json", contents: $base_contents' "$base_watcher_source"
+assert_contains 'README.md", contents: $readme_contents' "$base_watcher_source"
+assert_contains 'base_contents="$(base64 < supported_bases.json' "$base_watcher_source"
+assert_contains 'readme_contents="$(base64 < README.md' "$base_watcher_source"
+assert_contains 'repos/$GITHUB_REPOSITORY/commits/$commit_oid' "$base_watcher_source"
+assert_contains '.commit.verification.verified == true' "$base_watcher_source"
+assert_contains 'GitHub watcher commit was not verified; refusing branch update' "$base_watcher_source"
+assert_contains 'current_remote="$(gh api' "$base_watcher_source"
+assert_contains 'UpdateRefsInput!' "$base_watcher_source"
+assert_contains 'updateRefs' "$base_watcher_source"
+assert_contains 'beforeOid: $before_oid' "$base_watcher_source"
+assert_contains 'repositoryId: $repository_id' "$base_watcher_source"
+assert_contains 'force: true' "$base_watcher_source"
+assert_contains 'before_oid=0000000000000000000000000000000000000000' "$base_watcher_source"
+assert_contains 'GitHub rejected the guarded watcher branch update' "$base_watcher_source"
+assert_contains 'gh api --method DELETE' "$base_watcher_source"
+assert_contains 'watcher branch tree matches but its head is not verified; recreating it' "$base_watcher_source"
+assert_contains 'existing_details="$(gh api' "$base_watcher_source"
+assert_before '.commit.verification.verified == true' 'updateRefs' "$base_watcher_source"
+assert_before 'GitHub watcher commit was not verified; refusing branch update' 'updateRefs' "$base_watcher_source"
+assert_no_text_match 'git commit|git add|git push|git config user\.(name|email)|bot-user|APP_SLUG|BOT_USER_ID' \
+  "$base_watcher_source"
 assert_contains 'scripts/update-supported-bases.py' "$base_watcher_source"
 assert_contains '--manifest supported_bases.json' "$base_watcher_source"
 assert_contains '--readme README.md' "$base_watcher_source"
@@ -1297,8 +1605,6 @@ assert_contains 'python3 -m unittest tests/test_update_supported_bases.py' "$bas
 assert_contains 'scripts/validate-supported-bases.sh supported_bases.json' "$base_watcher_source"
 assert_contains 'tests/scripts_test.sh' "$base_watcher_source"
 assert_contains 'git diff --check' "$base_watcher_source"
-assert_contains 'git add supported_bases.json README.md' "$base_watcher_source"
-assert_contains '--force-with-lease' "$base_watcher_source"
 assert_contains 'gh pr list' "$base_watcher_source"
 assert_contains 'gh pr edit' "$base_watcher_source"
 assert_contains 'gh pr create' "$base_watcher_source"
