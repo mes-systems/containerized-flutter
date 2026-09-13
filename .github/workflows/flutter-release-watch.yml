@@ -80,25 +80,6 @@ jobs:
             || true
           git checkout -B "$WATCHER_BRANCH" origin/main
 
-      - name: Resolve GitHub App bot identity
-        id: bot-user
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$APP_SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
-            printf 'unexpected GitHub App slug: %s\n' "$APP_SLUG" >&2
-            exit 1
-          }
-          bot_user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
-          [[ "$bot_user_id" =~ ^[0-9]+$ ]] || {
-            printf 'unexpected GitHub App bot user ID: %s\n' "$bot_user_id" >&2
-            exit 1
-          }
-          printf 'user-id=%s\n' "$bot_user_id" >> "$GITHUB_OUTPUT"
-
       - name: Calculate supported Flutter release update
         id: update
         shell: bash
@@ -148,33 +129,172 @@ jobs:
           tests/scripts_test.sh
           git diff --check
 
-      - name: Commit and push watcher branch
+      - name: Create and verify GitHub-signed watcher commit
         if: steps.update.outputs.status == 'update' && steps.guardrails.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          BOT_USER_ID: ${{ steps.bot-user.outputs.user-id }}
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${BOT_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
-          if git show-ref --verify --quiet "refs/remotes/origin/$WATCHER_BRANCH" \
-            && git diff --quiet "refs/remotes/origin/$WATCHER_BRANCH" --; then
-            printf 'watcher branch already matches current main and generated files\n'
-            exit 0
-          fi
-          git add supported_version.json README.md
-          git diff --cached --check
-          git commit -m "$PR_TITLE"
+
+          main_sha="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+          [[ "$main_sha" =~ ^[[:xdigit:]]{40}$ ]] || {
+            printf 'invalid fetched main SHA: %s\n' "$main_sha" >&2
+            exit 1
+          }
 
           expected_remote=""
           if git show-ref --verify --quiet "refs/remotes/origin/$WATCHER_BRANCH"; then
-            expected_remote="$(git rev-parse "refs/remotes/origin/$WATCHER_BRANCH")"
+            expected_remote="$(git rev-parse --verify "refs/remotes/origin/$WATCHER_BRANCH^{commit}")"
+            [[ "$expected_remote" =~ ^[[:xdigit:]]{40}$ ]] || {
+              printf 'invalid existing watcher branch SHA: %s\n' "$expected_remote" >&2
+              exit 1
+            }
           fi
-          git push \
-            --force-with-lease="refs/heads/$WATCHER_BRANCH:$expected_remote" \
-            origin "HEAD:refs/heads/$WATCHER_BRANCH"
+          if git show-ref --verify --quiet "refs/remotes/origin/$WATCHER_BRANCH" \
+            && git diff --quiet "refs/remotes/origin/$WATCHER_BRANCH" --; then
+            existing_details="$(gh api \
+              "repos/$GITHUB_REPOSITORY/commits/$expected_remote")"
+            if jq -e '.commit.verification.verified == true' \
+              <<< "$existing_details" >/dev/null; then
+              printf 'watcher branch already matches current main and generated files\n'
+              exit 0
+            fi
+            printf 'watcher branch tree matches but its head is not verified; recreating it\n'
+          fi
+
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || {
+            printf 'invalid workflow run identity for temporary ref\n' >&2
+            exit 1
+          }
+          temp_branch="automation/tmp/flutter-support-update-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          temp_created=false
+          cleanup_temp_ref() {
+            if [[ "$temp_created" == true ]]; then
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/git/refs/heads/$temp_branch" \
+                >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_temp_ref EXIT
+
+          jq -cn --arg ref "refs/heads/$temp_branch" --arg sha "$main_sha" \
+            '{ref: $ref, sha: $sha}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" --input - \
+            >/dev/null
+          temp_created=true
+
+          version_contents="$(base64 < supported_version.json | tr -d '\n')"
+          readme_contents="$(base64 < README.md | tr -d '\n')"
+          [[ -n "$version_contents" && -n "$readme_contents" ]] || {
+            printf 'generated watcher files could not be encoded\n' >&2
+            exit 1
+          }
+
+          commit_response="$(
+            jq -cn \
+              --arg query 'mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }' \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg ref "refs/heads/$temp_branch" \
+              --arg expected_head "$main_sha" \
+              --arg headline "$PR_TITLE" \
+              --arg version_contents "$version_contents" \
+              --arg readme_contents "$readme_contents" \
+              '{
+                query: $query,
+                variables: {input: {
+                  branch: {
+                    repositoryNameWithOwner: $repository,
+                    refName: $ref
+                  },
+                  message: {headline: $headline},
+                  expectedHeadOid: $expected_head,
+                  fileChanges: {additions: [
+                    {path: "supported_version.json", contents: $version_contents},
+                    {path: "README.md", contents: $readme_contents}
+                  ]}
+                }}
+              }' \
+              | gh api graphql --input -
+          )"
+          jq -e '(.errors // []) | length == 0' <<< "$commit_response" >/dev/null || {
+            printf 'GitHub did not create the watcher commit\n' >&2
+            exit 1
+          }
+          commit_oid="$(jq -er '.data.createCommitOnBranch.commit.oid // empty' <<< "$commit_response")" || {
+            printf 'GitHub returned no watcher commit SHA\n' >&2
+            exit 1
+          }
+          [[ "$commit_oid" =~ ^[[:xdigit:]]{40}$ ]] || {
+            printf 'GitHub returned a malformed watcher commit SHA\n' >&2
+            exit 1
+          }
+          commit_oid="${commit_oid,,}"
+
+          commit_details="$(gh api "repos/$GITHUB_REPOSITORY/commits/$commit_oid")"
+          jq -e --arg oid "$commit_oid" --arg parent "$main_sha" '
+            .sha == $oid
+            and (.commit.verification | type == "object")
+            and .commit.verification.verified == true
+            and (.parents | type == "array" and length == 1)
+            and .parents[0].sha == $parent
+          ' <<< "$commit_details" >/dev/null || {
+            printf 'GitHub watcher commit was not verified; refusing branch update\n' >&2
+            exit 1
+          }
+
+          if [[ -n "$expected_remote" ]]; then
+            current_remote="$(gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/heads/$WATCHER_BRANCH" \
+              --jq '.object.sha')"
+            [[ "$current_remote" == "$expected_remote" ]] || {
+              printf 'watcher branch changed while preparing the commit\n' >&2
+              exit 1
+            }
+          fi
+          repository_node_id="$(gh api \
+            "repos/$GITHUB_REPOSITORY" \
+            --jq '.node_id')"
+          [[ -n "$repository_node_id" ]] || {
+            printf 'GitHub returned no repository node ID\n' >&2
+            exit 1
+          }
+          before_oid="$expected_remote"
+          [[ -n "$before_oid" ]] || \
+            before_oid=0000000000000000000000000000000000000000
+          ref_update_response="$(
+            jq -cn \
+              --arg query 'mutation($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }' \
+              --arg repository_id "$repository_node_id" \
+              --arg ref "refs/heads/$WATCHER_BRANCH" \
+              --arg before_oid "$before_oid" \
+              --arg after_oid "$commit_oid" \
+              '{
+                query: $query,
+                variables: {input: {
+                  repositoryId: $repository_id,
+                  refUpdates: [{
+                    name: $ref,
+                    beforeOid: $before_oid,
+                    afterOid: $after_oid,
+                    force: true
+                  }]
+                }}
+              }' \
+              | gh api graphql --input -
+          )"
+          jq -e '(.errors // []) | length == 0' <<< "$ref_update_response" >/dev/null || {
+            printf 'GitHub rejected the guarded watcher branch update\n' >&2
+            exit 1
+          }
+
+          canonical_sha="$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/heads/$WATCHER_BRANCH" \
+            --jq '.object.sha')"
+          [[ "$canonical_sha" == "$commit_oid" ]] || {
+            printf 'watcher branch did not move to the verified commit\n' >&2
+            exit 1
+          }
 
       - name: Create or update watcher pull request
         if: steps.update.outputs.status == 'update' && steps.guardrails.outcome == 'success'

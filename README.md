@@ -235,9 +235,11 @@ sets `deployment: false` because it is not a deployment workflow. Add only:
 Install the dedicated least-privilege GitHub App with Metadata read, Contents
 read/write, Pull requests read/write, and Issues read/write permissions. Do not
 use repository-level equivalents or a PAT. The watcher discovers releases,
-resets its stable automation branch from current `main`, and proposes a PR; it
-does not modify `main` or merge automatically. Ordinary PR CI remains the
-acceptance gate.
+creates its proposal commit through GitHub's API from current `main`, and
+proposes a PR; it does not modify `main` or merge automatically. GitHub signs
+those API-created commits and marks them verified when supported, so this
+repository stores no persistent commit-signing private key. Ordinary PR CI
+remains the acceptance gate.
 
 Dependabot checks pinned GitHub Actions revisions weekly. Docker Dependabot is
 not configured because `FROM ${BASE_IMAGE}` is resolved from the maintainer-
@@ -257,8 +259,9 @@ required reviewer and add only:
 ## CI and maintenance
 
 PR CI and registry publication intentionally use different scopes. CI fails
-safe: any unknown or toolchain-relevant change runs the full supported
-Flutter/base validation matrix.
+safe: README/docs-only changes run no image builds, support-manifest-only
+changes use the affected image matrix, and any unknown or common
+build-affecting change runs the full supported Flutter/base validation matrix.
 
 Automatic main-branch publication is narrower:
 
@@ -275,5 +278,5 @@ full publication matrix. A supported-version change publishes changed Flutter
 releases across all current bases; a supported-base digest change publishes
 all current Flutter releases for that base.
 Retired GHCR artifacts are not deleted. Watcher PRs still pass through this
-ordinary full-matrix CI gate; the watcher does not bypass release verification
-or image tests.
+ordinary CI gate and the watcher does not bypass release verification or image
+tests. Manual CI dispatch always runs the full matrix.
