@@ -21,11 +21,11 @@
       "archive_sha256": "a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb"
     },
     {
-      "version": "3.47.3",
+      "version": "3.47.4",
       "channel": "stable",
-      "revision": "e8113bf45620cbeb8aff64947ee4c93e16adb4cf",
-      "archive": "stable/linux/flutter_linux_3.47.3-stable.tar.xz",
-      "archive_sha256": "988665565cad9091db1baa54bf6d3868bb40e29719592f3c3a164deefd4208e1"
+      "revision": "9584c6713b324636289d067944a46fd6b49df14b",
+      "archive": "stable/linux/flutter_linux_3.47.4-stable.tar.xz",
+      "archive_sha256": "5b45f0ceda99b9bebdc873e7e69f6450aeb4c30f454b505e2e62fc9255a907d3"
     }
   ]
 }
