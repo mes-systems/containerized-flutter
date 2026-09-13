@@ -123,10 +123,10 @@ assert_metadata_matches_base_manifest() {
   variant="$(jq -er '.variant' <<< "$base")"
   reference="$(jq -er '.reference' <<< "$base")"
 
-  digest="${reference##*@}"
+  digest="$(printf '%s' "${reference##*@}" | tr '[:upper:]' '[:lower:]')"
   digest_hex="${digest#sha256:}"
   digest_short="${digest_hex:0:12}"
-  repository_sha_short="${repository_sha:0:12}"
+  repository_sha_short="$(printf '%.12s' "$repository_sha" | tr '[:upper:]' '[:lower:]')"
 
   metadata="$(
     "$ROOT_DIR/scripts/image-metadata.sh" \
