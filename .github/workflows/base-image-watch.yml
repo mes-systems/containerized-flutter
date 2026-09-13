@@ -211,7 +211,7 @@ jobs:
             jq -cn \
               --arg query 'mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }' \
               --arg repository "$GITHUB_REPOSITORY" \
-              --arg ref "refs/heads/$temp_branch" \
+              --arg branch_name "$temp_branch" \
               --arg expected_head "$main_sha" \
               --arg headline "$PR_TITLE" \
               --arg base_contents "$base_contents" \
@@ -221,7 +221,7 @@ jobs:
                 variables: {input: {
                   branch: {
                     repositoryNameWithOwner: $repository,
-                    refName: $ref
+                    branchName: $branch_name
                   },
                   message: {headline: $headline},
                   expectedHeadOid: $expected_head,
