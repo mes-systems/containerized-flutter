@@ -115,6 +115,7 @@ jobs:
             supported_bases.json
 
       - name: Set up Docker with containerd image store
+        id: docker
         uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5
         with:
           version: v29.8.0
@@ -159,8 +160,27 @@ jobs:
             SOURCE_REVISION=${{ github.sha }}
 
       - name: Verify local build attestations
+        env:
+          DOCKER_SOCKET: ${{ steps.docker.outputs.sock }}
         run: |
           set -euo pipefail
+
+          docker_socket_uri="${DOCKER_SOCKET:?docker/setup-docker-action did not return a socket}"
+          case "$docker_socket_uri" in
+            unix://*)
+              docker_socket="${docker_socket_uri#unix://}"
+              ;;
+            *)
+              printf 'unexpected Docker socket URI: %s\n' "$docker_socket_uri" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ ! -S "$docker_socket" ]]; then
+            printf 'Docker socket does not exist or is not a Unix socket: %s\n' \
+              "$docker_socket" >&2
+            exit 1
+          fi
 
           image="${{ env.IMAGE_NAME }}:${{ steps.metadata.outputs.tag }}"
           expected_base_digest="${{ matrix.base_reference }}"
@@ -173,7 +193,7 @@ jobs:
               --fail-with-body \
               --silent \
               --show-error \
-              --unix-socket /var/run/docker.sock \
+              --unix-socket "$docker_socket" \
               --get \
               --data-urlencode 'platform={"os":"linux","architecture":"amd64"}' \
               --data-urlencode 'statement=1' \

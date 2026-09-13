@@ -18,7 +18,7 @@ assert_no_text_match() {
   local pattern="$1"
   local haystack="$2"
   local status
-  if grep -nE "$pattern" <<< "$haystack"; then
+  if grep -nE -- "$pattern" <<< "$haystack"; then
     fail "unexpected match: $pattern"
   else
     status=$?
@@ -958,7 +958,7 @@ acquire_source="$(sed -n '1,180p' "$ROOT_DIR/scripts/acquire-flutter.sh")"
 assert_no_text_match 'empty Flutter attestation bundle' "$acquire_source"
 assert_contains 'optional Flutter attestation bundle unavailable' "$acquire_source"
 
-publish_source="$(sed -n '1,360p' "$ROOT_DIR/.github/workflows/publish.yml")"
+publish_source="$(sed -n '1,400p' "$ROOT_DIR/.github/workflows/publish.yml")"
 publish_cleanup_source="$(sed -n '/^      - name: Remove tested image/,$p' <<< "$publish_source")"
 publication_source="$(sed -n '1,280p' "$publication_classifier")"
 ci_source="$(sed -n '1,280p' "$ROOT_DIR/.github/workflows/ci.yml")"
@@ -1026,6 +1026,7 @@ publish_push_source="$(workflow_step 'Push tested image and capture digest' "$pu
   || fail 'publication artifact input policy must have one path table'
 assert_no_text_match 'awk.*digest:' "$publish_source"
 for docker_setup_source in "$ci_docker_setup_source" "$publish_docker_setup_source"; do
+  assert_contains 'id: docker' "$docker_setup_source"
   assert_contains 'uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1' \
     "$docker_setup_source"
   assert_contains 'version: v29.8.0' "$docker_setup_source"
@@ -1071,7 +1072,7 @@ for workflow_name in ci publish; do
   assert_contains '--fail-with-body' "$attest_source"
   assert_contains '--silent' "$attest_source"
   assert_contains '--show-error' "$attest_source"
-  assert_contains '--unix-socket /var/run/docker.sock' "$attest_source"
+  assert_contains '--unix-socket "$docker_socket"' "$attest_source"
   assert_contains '--get' "$attest_source"
   assert_contains "--data-urlencode 'platform={\"os\":\"linux\",\"architecture\":\"amd64\"}'" \
     "$attest_source"
@@ -1104,6 +1105,16 @@ for workflow_name in ci publish; do
   assert_no_text_match 'buildx\.build\.ref' "$attest_source"
   assert_no_text_match 'history inspect' "$attest_source"
   assert_no_text_match 'Attachments\[\]\.Type' "$attest_source"
+  assert_contains 'DOCKER_SOCKET: ${{ steps.docker.outputs.sock }}' "$attest_source"
+  assert_contains 'docker_socket_uri="${DOCKER_SOCKET:?docker/setup-docker-action did not return a socket}"' \
+    "$attest_source"
+  assert_contains 'case "$docker_socket_uri" in' "$attest_source"
+  assert_contains 'unix://*)' "$attest_source"
+  assert_contains 'docker_socket="${docker_socket_uri#unix://}"' "$attest_source"
+  assert_contains 'if [[ ! -S "$docker_socket" ]]; then' "$attest_source"
+  assert_contains 'Docker socket does not exist or is not a Unix socket: %s\n' "$attest_source"
+  assert_contains '--unix-socket "$docker_socket"' "$attest_source"
+  assert_no_text_match '--unix-socket /var/run/docker\.sock' "$attest_source"
 done
 assert_contains 'image="ghcr.io/mes-systems/containerized-flutter:${{ steps.metadata.outputs.tag }}"' \
   "$ci_attest_source"
