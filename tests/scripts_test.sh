@@ -43,6 +43,116 @@ assert_fails() {
   fi
 }
 
+assert_matrix_matches_manifests() {
+  local versions="$1"
+  local bases="$2"
+  local label="$3"
+  local matrix
+
+  matrix="$("$build_matrix_script" "$versions" "$bases")"
+
+  jq -e \
+    --slurpfile versions "$versions" \
+    --slurpfile bases "$bases" '
+      ($versions[0].supported_versions | length) as $version_count
+      | ($bases[0].bases | length) as $base_count
+
+      | (.include | length) == ($version_count * $base_count)
+
+      and (
+        [.include[] | [.version, .base_id]]
+        ==
+        [
+          $versions[0].supported_versions[] as $version
+          | $bases[0].bases[] as $base
+          | [$version.version, $base.id]
+        ]
+      )
+
+      and all(
+        .include[];
+
+        . as $row
+        | any(
+            $versions[0].supported_versions[];
+            .version == $row.version
+            and .channel == $row.channel
+            and .revision == $row.revision
+            and .archive == $row.archive
+            and .archive_sha256 == $row.archive_sha256
+          )
+
+        and any(
+            $bases[0].bases[];
+            .id == $row.base_id
+            and .family == $row.base_family
+            and .version == $row.base_version
+            and .variant == $row.base_variant
+            and .reference == $row.base_reference
+          )
+      )
+    ' <<< "$matrix" >/dev/null \
+    || fail "$label build matrix does not match its manifests"
+}
+
+assert_metadata_matches_base_manifest() {
+  local flutter_version="$1"
+  local repository_sha="$2"
+  local base_id="$3"
+  local bases="$4"
+
+  local base
+  local family
+  local version
+  local variant
+  local reference
+  local digest
+  local digest_hex
+  local digest_short
+  local repository_sha_short
+  local metadata
+
+  base="$(
+    jq -cer --arg id "$base_id" \
+      '.bases[] | select(.id == $id)' \
+      "$bases"
+  )"
+
+  family="$(jq -er '.family' <<< "$base")"
+  version="$(jq -er '.version' <<< "$base")"
+  variant="$(jq -er '.variant' <<< "$base")"
+  reference="$(jq -er '.reference' <<< "$base")"
+
+  digest="${reference##*@}"
+  digest_hex="${digest#sha256:}"
+  digest_short="${digest_hex:0:12}"
+  repository_sha_short="${repository_sha:0:12}"
+
+  metadata="$(
+    "$ROOT_DIR/scripts/image-metadata.sh" \
+      "$flutter_version" \
+      "$repository_sha" \
+      "$base_id" \
+      "$bases"
+  )"
+
+  assert_contains "flutter_version=$flutter_version" "$metadata"
+  assert_contains "base_id=$base_id" "$metadata"
+  assert_contains "base_family=$family" "$metadata"
+  assert_contains "base_version=$version" "$metadata"
+  assert_contains "base_variant=$variant" "$metadata"
+  assert_contains "base_reference=$reference" "$metadata"
+  assert_contains "base_digest=$digest" "$metadata"
+  assert_contains "base_digest_short=$digest_short" "$metadata"
+  assert_contains "repository_sha_short=$repository_sha_short" "$metadata"
+  assert_contains \
+    "tag=$flutter_version-$base_id-$digest_short" \
+    "$metadata"
+  assert_contains \
+    "build_tag=$flutter_version-$base_id-$digest_short-g$repository_sha_short" \
+    "$metadata"
+}
+
 manifest="$ROOT_DIR/supported_version.json"
 validator="$ROOT_DIR/scripts/validate-supported-versions.sh"
 base_manifest="$ROOT_DIR/supported_bases.json"
@@ -60,25 +170,17 @@ command -v grep >/dev/null 2>&1 || fail 'required command not found: grep'
 python3 "$ROOT_DIR/tests/test_update_supported_versions.py"
 python3 "$ROOT_DIR/tests/test_update_supported_bases.py"
 "$dockerfile_guard" "$ROOT_DIR/Dockerfile"
-current_matrix="$("$build_matrix_script" "$manifest" "$base_manifest")"
-[[ "$(jq -er '.include | length' <<< "$current_matrix")" == 12 ]] \
-  || fail 'current build matrix must contain twelve Flutter/base rows'
-jq -e '
-  [.include[] | [.version, .base_id]]
-  == [["3.41.9", "ubuntu24.04"],
-      ["3.41.9", "ubuntu26.04"],
-      ["3.41.9", "debian13"],
-      ["3.41.9", "debian13-slim"],
-      ["3.44.9", "ubuntu24.04"],
-      ["3.44.9", "ubuntu26.04"],
-      ["3.44.9", "debian13"],
-      ["3.44.9", "debian13-slim"],
-      ["3.47.3", "ubuntu24.04"],
-      ["3.47.3", "ubuntu26.04"],
-      ["3.47.3", "debian13"],
-      ["3.47.3", "debian13-slim"]]
-' <<< "$current_matrix" >/dev/null \
-  || fail 'current build matrix has unexpected Flutter/base pairs'
+assert_matrix_matches_manifests \
+  "$manifest" \
+  "$base_manifest" \
+  "current"
+current_matrix_row_count="$(
+  jq -ner \
+    --slurpfile versions "$manifest" \
+    --slurpfile bases "$base_manifest" \
+    '($versions[0].supported_versions | length)
+     * ($bases[0].bases | length)'
+)"
 
 assert_classification() {
   local expected="$1"
@@ -165,12 +267,50 @@ assert_publication_mode full \
 dispatch_mode="$("$publication_classifier" --workflow-dispatch "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$dispatch_mode"
 dispatch_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$dispatch_mode")"
-[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == 12 ]] \
+[[ "$(jq -er '.include | length' <<< "$dispatch_matrix")" == "$current_matrix_row_count" ]] \
   || fail 'workflow_dispatch did not plan every supported Flutter/base row'
 assert_fails "$publication_classifier" --revisions not-a-base not-a-head
 
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "$test_dir"' EXIT
+
+watcher_flutter_manifest="$test_dir/watcher-flutter-update.json"
+jq '
+  .supported_versions[-1].version as $old
+  | ($old | split(".")) as $parts
+  | ($parts[0] + "." + $parts[1] + "." +
+      (((($parts[2] | tonumber) + 1)) | tostring)) as $new
+  | .supported_versions[-1].version = $new
+  | .supported_versions[-1].revision =
+      "7777777777777777777777777777777777777777"
+  | .supported_versions[-1].archive =
+      ("stable/linux/flutter_linux_" + $new + "-stable.tar.xz")
+  | .supported_versions[-1].archive_sha256 =
+      "1111111111111111111111111111111111111111111111111111111111111111"
+' "$manifest" > "$watcher_flutter_manifest"
+"$validator" "$watcher_flutter_manifest"
+assert_matrix_matches_manifests \
+  "$watcher_flutter_manifest" \
+  "$base_manifest" \
+  "Flutter watcher patch update"
+
+watcher_new_minor_manifest="$test_dir/watcher-new-minor.json"
+jq '
+  .supported_versions += [{
+    "version": "2.1.0",
+    "channel": "stable",
+    "revision": "8888888888888888888888888888888888888888",
+    "archive": "stable/linux/flutter_linux_2.1.0-stable.tar.xz",
+    "archive_sha256":
+      "2222222222222222222222222222222222222222222222222222222222222222"
+  }]
+' "$ROOT_DIR/tests/fixtures/supported_version.json" \
+  > "$watcher_new_minor_manifest"
+"$validator" "$watcher_new_minor_manifest"
+assert_matrix_matches_manifests \
+  "$watcher_new_minor_manifest" \
+  "$base_manifest" \
+  "Flutter watcher new minor"
 
 for filter in \
   'del(.schema)' \
@@ -325,7 +465,7 @@ fixture_dockerfile_plan="$(cd "$fixture_repo" && "$publication_classifier" --rev
   "$fixture_docs_head" "$fixture_toolchain_head" "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$fixture_dockerfile_plan"
 fixture_dockerfile_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_dockerfile_plan")"
-[[ "$(jq -er '.include | length' <<< "$fixture_dockerfile_matrix")" == 12 ]] \
+[[ "$(jq -er '.include | length' <<< "$fixture_dockerfile_matrix")" == "$current_matrix_row_count" ]] \
   || fail 'Dockerfile revision range did not plan the full matrix'
 
 printf 'Dockerfile exclusions\n' > "$fixture_repo/.dockerignore"
@@ -336,7 +476,7 @@ fixture_dockerignore_plan="$(cd "$fixture_repo" && "$publication_classifier" --r
   "$fixture_toolchain_head" "$fixture_dockerignore_head" "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$fixture_dockerignore_plan"
 fixture_dockerignore_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_dockerignore_plan")"
-[[ "$(jq -er '.include | length' <<< "$fixture_dockerignore_matrix")" == 12 ]] \
+[[ "$(jq -er '.include | length' <<< "$fixture_dockerignore_matrix")" == "$current_matrix_row_count" ]] \
   || fail '.dockerignore revision range did not plan the full matrix'
 
 mkdir -p "$fixture_repo/scripts"
@@ -348,7 +488,7 @@ fixture_metadata_plan="$(cd "$fixture_repo" && "$publication_classifier" --revis
   "$fixture_dockerignore_head" "$fixture_metadata_head" "$manifest" "$base_manifest")"
 assert_contains 'publish_mode=full' "$fixture_metadata_plan"
 fixture_metadata_matrix="$(sed -n 's/^publish_matrix=//p' <<< "$fixture_metadata_plan")"
-[[ "$(jq -er '.include | length' <<< "$fixture_metadata_matrix")" == 12 ]] \
+[[ "$(jq -er '.include | length' <<< "$fixture_metadata_matrix")" == "$current_matrix_row_count" ]] \
   || fail 'image metadata revision range did not plan the full matrix'
 
 mkdir -p "$fixture_repo/.github/workflows" "$fixture_repo/scripts" "$fixture_repo/tests"
@@ -725,76 +865,47 @@ if "$validator" "$test_dir/duplicate-minor.json" > "$duplicate_minor_output" 2>&
 fi
 assert_contains 'duplicate Flutter minor line' "$(< "$duplicate_minor_output")"
 
-metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
-  c9a6c484230f8b5e408ec57be1ef71dee1e77020 ubuntu24.04 "$base_manifest")"
-assert_contains 'flutter_version=3.47.3' "$metadata"
-assert_contains 'base_id=ubuntu24.04' "$metadata"
-assert_contains 'base_family=ubuntu' "$metadata"
-assert_contains 'base_version=24.04' "$metadata"
-assert_contains 'base_variant=default' "$metadata"
-assert_contains 'base_reference=ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254' "$metadata"
-assert_contains 'base_digest=sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254' "$metadata"
-assert_contains 'base_digest_short=224a1869083a' "$metadata"
-assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
-assert_contains 'tag=3.47.3-ubuntu24.04-224a1869083a' "$metadata"
-assert_contains 'build_tag=3.47.3-ubuntu24.04-224a1869083a-gc9a6c484230f' \
-  "$metadata"
+metadata_flutter_version="1.2.3"
+metadata_repository_sha="c9a6c484230f8b5e408ec57be1ef71dee1e77020"
 
-ubuntu26_reference="$(
-  jq -er '.bases[] | select(.id == "ubuntu26.04") | .reference' \
+while IFS= read -r base_id; do
+  assert_metadata_matches_base_manifest \
+    "$metadata_flutter_version" \
+    "$metadata_repository_sha" \
+    "$base_id" \
     "$base_manifest"
-)"
-ubuntu26_digest="${ubuntu26_reference##*@}"
-ubuntu26_hex="${ubuntu26_digest#sha256:}"
-ubuntu26_short="${ubuntu26_hex:0:12}"
-metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
-  c9a6c484230f8b5e408ec57be1ef71dee1e77020 ubuntu26.04 "$base_manifest")"
-assert_contains 'flutter_version=3.47.3' "$metadata"
-assert_contains 'base_id=ubuntu26.04' "$metadata"
-assert_contains 'base_family=ubuntu' "$metadata"
-assert_contains 'base_version=26.04' "$metadata"
-assert_contains 'base_variant=default' "$metadata"
-assert_contains "base_reference=$ubuntu26_reference" "$metadata"
-assert_contains "base_digest=$ubuntu26_digest" "$metadata"
-assert_contains "base_digest_short=$ubuntu26_short" "$metadata"
-assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
-assert_contains "tag=3.47.3-ubuntu26.04-$ubuntu26_short" "$metadata"
-assert_contains "build_tag=3.47.3-ubuntu26.04-$ubuntu26_short-gc9a6c484230f" \
-  "$metadata"
+done < <(jq -r '.bases[].id' "$base_manifest")
 
-metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
-  c9a6c484230f8b5e408ec57be1ef71dee1e77020 debian13 "$base_manifest")"
-assert_contains 'flutter_version=3.47.3' "$metadata"
-assert_contains 'base_id=debian13' "$metadata"
-assert_contains 'base_family=debian' "$metadata"
-assert_contains 'base_version=13' "$metadata"
-assert_contains 'base_variant=default' "$metadata"
-assert_contains 'base_reference=debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1' \
-  "$metadata"
-assert_contains 'base_digest=sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1' \
-  "$metadata"
-assert_contains 'base_digest_short=f324c7ff5432' "$metadata"
-assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
-assert_contains 'tag=3.47.3-debian13-f324c7ff5432' "$metadata"
-assert_contains 'build_tag=3.47.3-debian13-f324c7ff5432-gc9a6c484230f' \
-  "$metadata"
+base_index=0
+while IFS= read -r base_id; do
+  base_index=$((base_index + 1))
+  rotated_hex="$(printf '%064x' "$base_index")"
+  rotated_bases="$test_dir/rotated-$base_id.json"
 
-metadata="$("$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
-  c9a6c484230f8b5e408ec57be1ef71dee1e77020 debian13-slim "$base_manifest")"
-assert_contains 'flutter_version=3.47.3' "$metadata"
-assert_contains 'base_id=debian13-slim' "$metadata"
-assert_contains 'base_family=debian' "$metadata"
-assert_contains 'base_version=13' "$metadata"
-assert_contains 'base_variant=slim' "$metadata"
-assert_contains 'base_reference=debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132' \
-  "$metadata"
-assert_contains 'base_digest=sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132' \
-  "$metadata"
-assert_contains 'base_digest_short=d7e12182ce18' "$metadata"
-assert_contains 'repository_sha_short=c9a6c484230f' "$metadata"
-assert_contains 'tag=3.47.3-debian13-slim-d7e12182ce18' "$metadata"
-assert_contains 'build_tag=3.47.3-debian13-slim-d7e12182ce18-gc9a6c484230f' \
-  "$metadata"
+  jq \
+    --arg id "$base_id" \
+    --arg digest "sha256:$rotated_hex" '
+      .bases |= map(
+        if .id == $id then
+          .reference =
+            ((.reference | split("@")[0]) + "@" + $digest)
+        else
+          .
+        end
+      )
+    ' "$base_manifest" > "$rotated_bases"
+
+  "$base_validator" "$rotated_bases"
+  assert_matrix_matches_manifests \
+    "$manifest" \
+    "$rotated_bases" \
+    "Base watcher digest rotation for $base_id"
+  assert_metadata_matches_base_manifest \
+    "$metadata_flutter_version" \
+    "$metadata_repository_sha" \
+    "$base_id" \
+    "$rotated_bases"
+done < <(jq -r '.bases[].id' "$base_manifest")
 
 assert_fails "$ROOT_DIR/scripts/image-metadata.sh" 3.47.3 \
   c9a6c484230f8b5e408ec57be1ef71dee1e77020 unknown-base "$base_manifest"
