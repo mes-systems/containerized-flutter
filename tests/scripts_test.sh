@@ -1667,7 +1667,7 @@ assert_no_text_match 'secrets\.FLUTTER_WATCHER_(APP|CLIENT)_ID|app-id:|peter-eva
 assert_no_text_match 'git config user\.name "flutter-release-watcher\[bot\]"' "$watcher_source"
 
 base_watcher_source="$(sed -n '1,360p' "$ROOT_DIR/.github/workflows/base-image-watch.yml")"
-assert_contains 'cron: "0 3 * * 0"' "$base_watcher_source"
+assert_contains 'cron: "0 3 * * *"' "$base_watcher_source"
 assert_contains 'workflow_dispatch:' "$base_watcher_source"
 assert_contains 'group: base-image-watcher' "$base_watcher_source"
 assert_contains 'cancel-in-progress: false' "$base_watcher_source"
