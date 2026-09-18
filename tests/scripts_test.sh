@@ -1364,8 +1364,12 @@ publish_push_source="$(workflow_step 'Push tested image and capture digest' "$pu
 assert_no_text_match 'awk.*digest:' "$publish_source"
 for docker_setup_source in "$ci_docker_setup_source" "$publish_docker_setup_source"; do
   assert_contains 'id: docker' "$docker_setup_source"
-  assert_contains 'uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1' \
-    "$docker_setup_source"
+
+  grep -Eq \
+    'uses: docker/setup-docker-action@[0-9a-f]{40}([[:space:]]+#.*)?$' \
+    <<< "$docker_setup_source" \
+    || fail 'docker/setup-docker-action must be pinned to a full commit SHA'
+
   assert_contains 'version: v29.8.0' "$docker_setup_source"
   assert_contains '"containerd-snapshotter": true' "$docker_setup_source"
 done
