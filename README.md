@@ -66,10 +66,10 @@ immutable release lines.
 <!-- BEGIN GENERATED SUPPORTED BASES -->
 | Base ID | Family | Version | Variant | Digest |
 | --- | --- | --- | --- | --- |
-| `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:b3cc40b72b93...` |
-| `ubuntu26.04` | ubuntu | 26.04 | default | `sha256:9559ceb7c21e...` |
-| `debian13` | debian | 13 | default | `sha256:f324c7ff5432...` |
-| `debian13-slim` | debian | 13 | slim | `sha256:d7e12182ce18...` |
+| `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:008173c23f95...` |
+| `ubuntu26.04` | ubuntu | 26.04 | default | `sha256:da6fc2be5478...` |
+| `debian13` | debian | 13 | default | `sha256:9cc080028c43...` |
+| `debian13-slim` | debian | 13 | slim | `sha256:a99cfc517144...` |
 <!-- END GENERATED SUPPORTED BASES -->
 
 Debian 13 default and Debian 13 Slim are supported.

@@ -6,28 +6,28 @@
       "family": "ubuntu",
       "version": "24.04",
       "variant": "default",
-      "reference": "ubuntu:24.04@sha256:b3cc40b72b93588182b5410f723c7aaf142363311c2aa993d8a453ddcbb3ae15"
+      "reference": "ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
     },
     {
       "id": "ubuntu26.04",
       "family": "ubuntu",
       "version": "26.04",
       "variant": "default",
-      "reference": "ubuntu:26.04@sha256:9559ceb7c21e528e233e8dff26a0fb2682f4094cce06176eeb075d87a22b31de"
+      "reference": "ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78"
     },
     {
       "id": "debian13",
       "family": "debian",
       "version": "13",
       "variant": "default",
-      "reference": "debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1"
+      "reference": "debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c"
     },
     {
       "id": "debian13-slim",
       "family": "debian",
       "version": "13",
       "variant": "slim",
-      "reference": "debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132"
+      "reference": "debian:13-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a"
     }
   ]
 }
