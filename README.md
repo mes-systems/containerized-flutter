@@ -95,7 +95,7 @@ releases.
 | --- | --- | --- | --- |
 | 3.41.9 | stable | `00b0c91f06209d9e4a41f71b7a512d6eb3b9c694` | `cf2631dde02570733921a530f47a96abe896b5e334682d2743c29530ea88bb2e` |
 | 3.44.9 | stable | `6b182d2c7585eba26d4edce0f97630effd256c33` | `a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb` |
-| 3.47.4 | stable | `9584c6713b324636289d067944a46fd6b49df14b` | `5b45f0ceda99b9bebdc873e7e69f6450aeb4c30f454b505e2e62fc9255a907d3` |
+| 3.47.5 | stable | `6a19cca56475dbfba1478ee68d7bd0c2ef891da1` | `2132e990f236f8d22e7c6314b29a191a95b10d7cbcfec9b4e2e303d996652cbb` |
 <!-- END GENERATED SUPPORTED FLUTTER RELEASES -->
 
 The initial image target is Linux amd64 only.
