@@ -11,6 +11,10 @@ This repository builds a reusable Linux amd64 Flutter SDK/toolchain image. It
 acquires official Flutter release archives before the Docker build, checks the
 release metadata and archive digest, and publishes versioned images to GHCR.
 
+Security vulnerabilities must be reported privately, not through public GitHub
+Issues. See [SECURITY.md](SECURITY.md) for reporting and upstream-routing
+guidance.
+
 ## Trust model
 
 The first release uses `supported_version.json` as the maintainer-reviewed

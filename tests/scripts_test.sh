@@ -258,6 +258,7 @@ assert_publication_mode none .github/workflows/flutter-release-watch.yml
 assert_publication_mode none .github/workflows/base-image-watch.yml
 assert_publication_mode none .github/workflows/publish.yml
 assert_publication_mode none .github/workflows/ci.yml
+assert_publication_mode none .github/workflows/scorecard.yml
 assert_publication_mode none scripts/update-supported-versions.py
 assert_publication_mode none scripts/update-supported-bases.py
 assert_publication_mode none scripts/verify-release.sh
@@ -266,7 +267,8 @@ assert_publication_mode none scripts/smoke-test.sh
 assert_publication_mode none scripts/classify-changes.sh
 assert_publication_mode none tests/test_update_supported_versions.py
 assert_publication_mode none tests/test_update_supported_bases.py
-assert_publication_mode none LICENSE SECURITY.md .github/dependabot.yml docs/maintenance.md
+assert_publication_mode none LICENSE SECURITY.md .github/dependabot.yml \
+  .github/VULNERABILITY_REPORT.yml docs/maintenance.md
 assert_publication_mode selective supported_version.json
 assert_publication_mode selective supported_bases.json
 assert_publication_mode selective supported_version.json README.md \
@@ -1747,6 +1749,64 @@ assert_no_text_match 'gh pr merge|git push[^\n]*main|secrets\.(PAT|GH_TOKEN)|pet
 assert_contains 'BEGIN GENERATED SUPPORTED BASES' "$(< "$ROOT_DIR/README.md")"
 assert_contains 'END GENERATED SUPPORTED BASES' "$(< "$ROOT_DIR/README.md")"
 assert_no_text_match 'Base refresh automation is.*deferred' "$(< "$ROOT_DIR/README.md")"
+
+scorecard_workflow="$ROOT_DIR/.github/workflows/scorecard.yml"
+scorecard_source="$(< "$scorecard_workflow")"
+scorecard_top_permissions="$(sed -n '/^permissions:/,/^jobs:/p' "$scorecard_workflow")"
+scorecard_job_permissions="$(sed -n '/^    permissions:/,/^    steps:/p' "$scorecard_workflow")"
+assert_contains $'push:\n    branches:\n      - main' "$scorecard_source"
+assert_contains "schedule:" "$scorecard_source"
+assert_contains "cron: '30 1 * * 6'" "$scorecard_source"
+assert_no_text_match '^[[:space:]]*pull_request(_target)?:' "$scorecard_source"
+assert_no_text_match '^[[:space:]]*(env|defaults):' "$scorecard_source"
+assert_contains "contents: read" "$scorecard_top_permissions"
+assert_no_text_match 'write' "$scorecard_top_permissions"
+assert_contains "contents: read" "$scorecard_job_permissions"
+assert_contains "security-events: write" "$scorecard_job_permissions"
+assert_contains "id-token: write" "$scorecard_job_permissions"
+scorecard_write_permission_count="$(grep -Ec \
+  '^[[:space:]]+[[:alnum:]_-]+:[[:space:]]*write([[:space:]]|$)' \
+  <<< "$scorecard_job_permissions")"
+[[ "$scorecard_write_permission_count" -eq 2 ]] \
+  || fail 'expected only security-events and id-token write permissions in Scorecard job'
+scorecard_action_count="$(grep -Ec '^[[:space:]]+uses:' "$scorecard_workflow")"
+scorecard_version_comment_count="$(grep -Ec \
+  '^[[:space:]]+uses: [^@]+@[0-9a-f]{40}[[:space:]]+# v[^[:space:]]+$' \
+  "$scorecard_workflow")"
+[[ "$scorecard_version_comment_count" -eq "$scorecard_action_count" ]] \
+  || fail 'every Scorecard workflow Action must have a full SHA pin and version comment'
+assert_contains "persist-credentials: false" "$scorecard_source"
+assert_no_text_match 'SCORECARD_TOKEN|repo_token|secrets\.' "$scorecard_source"
+assert_contains "results_format: sarif" "$scorecard_source"
+assert_contains "publish_results: true" "$scorecard_source"
+assert_contains "actions/upload-artifact@" "$scorecard_source"
+assert_contains "retention-days: 5" "$scorecard_source"
+assert_contains "github/codeql-action/upload-sarif@" "$scorecard_source"
+
+security_policy_source="$(< "$ROOT_DIR/SECURITY.md")"
+assert_contains "supported_version.json" "$security_policy_source"
+assert_contains "supported_bases.json" "$security_policy_source"
+assert_contains "Report a vulnerability" "$security_policy_source"
+assert_contains "public GitHub Issues" "$security_policy_source"
+assert_contains "https://github.com/flutter/.github/blob/main/SECURITY.md" \
+  "$security_policy_source"
+assert_contains "https://ubuntu.com/security/disclosure-policy" \
+  "$security_policy_source"
+assert_contains "https://www.debian.org/security/faq" "$security_policy_source"
+
+vulnerability_form_source="$(< "$ROOT_DIR/.github/VULNERABILITY_REPORT.yml")"
+assert_contains "public GitHub Issues" "$vulnerability_form_source"
+assert_contains "id: summary" "$vulnerability_form_source"
+assert_contains "id: affected_component" "$vulnerability_form_source"
+assert_contains "id: affected_image" "$vulnerability_form_source"
+assert_contains "id: flutter_version" "$vulnerability_form_source"
+assert_contains "id: base_image" "$vulnerability_form_source"
+assert_contains "id: details" "$vulnerability_form_source"
+assert_contains "id: proof_of_concept" "$vulnerability_form_source"
+assert_contains "min_length: 150" "$vulnerability_form_source"
+assert_contains "id: impact" "$vulnerability_form_source"
+assert_contains "id: upstream_relationship" "$vulnerability_form_source"
+assert_contains "id: additional_context" "$vulnerability_form_source"
 
 while IFS= read -r uses_line; do
   action_ref="$(sed -E 's/.*uses: [^@]+@([^ #]+).*/\1/' <<< "$uses_line")"
