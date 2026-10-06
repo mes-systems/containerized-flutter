@@ -20,14 +20,14 @@
       "family": "debian",
       "version": "13",
       "variant": "default",
-      "reference": "debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c"
+      "reference": "debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5"
     },
     {
       "id": "debian13-slim",
       "family": "debian",
       "version": "13",
       "variant": "slim",
-      "reference": "debian:13-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a"
+      "reference": "debian:13-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f"
     }
   ]
 }
