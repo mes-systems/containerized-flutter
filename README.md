@@ -70,8 +70,8 @@ immutable release lines.
 <!-- BEGIN GENERATED SUPPORTED BASES -->
 | Base ID | Family | Version | Variant | Digest |
 | --- | --- | --- | --- | --- |
-| `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:534baea6a22c...` |
-| `ubuntu26.04` | ubuntu | 26.04 | default | `sha256:f144425ff09b...` |
+| `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:68ee22004a91...` |
+| `ubuntu26.04` | ubuntu | 26.04 | default | `sha256:c098726dd9b9...` |
 | `debian13` | debian | 13 | default | `sha256:913f6706df59...` |
 | `debian13-slim` | debian | 13 | slim | `sha256:a29215f6a35e...` |
 <!-- END GENERATED SUPPORTED BASES -->
