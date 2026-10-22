@@ -72,8 +72,8 @@ immutable release lines.
 | --- | --- | --- | --- | --- |
 | `ubuntu24.04` | ubuntu | 24.04 | default | `sha256:68ee22004a91...` |
 | `ubuntu26.04` | ubuntu | 26.04 | default | `sha256:c098726dd9b9...` |
-| `debian13` | debian | 13 | default | `sha256:913f6706df59...` |
-| `debian13-slim` | debian | 13 | slim | `sha256:a29215f6a35e...` |
+| `debian13` | debian | 13 | default | `sha256:4c25275446ca...` |
+| `debian13-slim` | debian | 13 | slim | `sha256:62bd423aeee9...` |
 <!-- END GENERATED SUPPORTED BASES -->
 
 Debian 13 default and Debian 13 Slim are supported.
