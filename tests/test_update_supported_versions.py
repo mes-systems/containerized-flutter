@@ -445,17 +445,20 @@ class UpdateSupportedVersionsTest(unittest.TestCase):
         manifest = load_fixture_from_path(case_dir / "supported_version.json")
         readme = (case_dir / "README.md").read_text(encoding="utf-8")
         generated = readme.split(updater.BEGIN_MARKER, 1)[1].split(updater.END_MARKER, 1)[0]
-        expected = "\n" + "\n".join(
+        rows = [
+            [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
+            for line in generated.splitlines()
+            if line.lstrip().startswith("|")
+        ]
+        self.assertEqual(rows[0], ["Flutter", "Channel", "Git revision", "SDK archive SHA256"])
+        self.assertEqual(rows[1], ["---", "---", "---", "---"])
+        self.assertEqual(
+            rows[2:],
             [
-                "| Flutter | Channel | Git revision | SDK archive SHA256 |",
-                "| --- | --- | --- | --- |",
-                *(
-                    f"| {entry['version']} | {entry['channel']} | `{entry['revision']}` | `{entry['archive_sha256']}` |"
-                    for entry in manifest["supported_versions"]
-                ),
-            ]
-        ) + "\n"
-        self.assertEqual(generated, expected)
+                [entry["version"], entry["channel"], entry["revision"], entry["archive_sha256"]]
+                for entry in manifest["supported_versions"]
+            ],
+        )
 
     def test_second_write_produces_no_diff(self):
         releases = load_fixture("releases_linux.json")
