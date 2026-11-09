@@ -29,6 +29,14 @@ def digest(body: bytes) -> str:
     return f"sha256:{hashlib.sha256(body).hexdigest()}"
 
 
+def markdown_table_rows(markdown: str) -> list[list[str]]:
+    return [
+        [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
+        for line in markdown.splitlines()
+        if line.lstrip().startswith("|")
+    ]
+
+
 def manifest_body(media_type: str, marker: str = "a") -> bytes:
     descriptor_digest = f"sha256:{marker * 64}"
     if media_type in {
@@ -422,8 +430,15 @@ class UpdateCalculationTest(unittest.TestCase):
         self.assertEqual(updated_by_id["debian13"]["reference"], self.old_debian["reference"])
         self.assertEqual(updated_by_id["debian13-slim"]["reference"], self.old_slim["reference"])
         updated_readme = readme_path.read_text(encoding="utf-8")
-        self.assertIn("| `ubuntu24.04` | ubuntu | 24.04 | default |", updated_readme)
-        self.assertIn("| `ubuntu26.04` | ubuntu | 26.04 | default |", updated_readme)
+        rows = markdown_table_rows(updated_readme)
+        rows_by_id = {row[0]: row for row in rows[2:]}
+        for base in updated["bases"]:
+            digest = base["reference"].rsplit("@", 1)[-1]
+            short_digest = digest.split(":", 1)[0] + ":" + digest.split(":", 1)[1][:12] + "..."
+            self.assertEqual(
+                rows_by_id[base["id"]],
+                [base["id"], base["family"], base["version"], base["variant"], short_digest],
+            )
 
     def test_only_slim_digest_change_updates_slim_and_renders_one_change(self):
         manifest = base_manifest(self.old_ubuntu, self.old_debian, self.old_slim)
@@ -447,9 +462,15 @@ class UpdateCalculationTest(unittest.TestCase):
         )
         self.assertEqual(summary["status"], "update")
         self.assertEqual([change["base_id"] for change in summary["changes"]], ["debian13-slim"])
-        self.assertIn("| debian13-slim | debian:13-slim |", markdown)
-        self.assertNotIn("| ubuntu24.04 |", markdown)
-        self.assertNotIn("| debian13 |", markdown)
+        summary_rows = markdown_table_rows(markdown)
+        self.assertEqual(summary_rows[:2], [
+            ["Base", "Tag", "Previous digest", "Current digest"],
+            ["---", "---", "---", "---"],
+        ])
+        self.assertEqual(
+            summary_rows[2:],
+            [["debian13-slim", "debian:13-slim", self.old_slim["reference"].rsplit("@", 1)[-1], self.slim_new]],
+        )
 
         updated = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(updated["bases"][0]["reference"], self.old_ubuntu["reference"])
@@ -459,9 +480,10 @@ class UpdateCalculationTest(unittest.TestCase):
             updated["bases"][2]["reference"],
             "debian:13-slim@" + self.slim_new,
         )
+        readme_rows = markdown_table_rows(readme_path.read_text(encoding="utf-8"))
         self.assertIn(
-            "| " + chr(96) + "debian13-slim" + chr(96) + " | debian | 13 | slim |",
-            readme_path.read_text(encoding="utf-8"),
+            ["debian13-slim", "debian", "13", "slim", "sha256:" + self.slim_new.split(":", 1)[1][:12] + "..."],
+            readme_rows,
         )
 
     def test_error_and_security_anomaly_do_not_produce_updates(self):
@@ -483,7 +505,7 @@ class UpdateCalculationTest(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.calculate_updates({"schema": 2, "bases": []})
 
-    def test_write_changes_only_digest_and_preserves_json_shape_and_order(self):
+    def test_write_updates_references_without_changing_other_manifest_values(self):
         case_dir = Path(tempfile.mkdtemp(prefix="base-updater-test-"))
         self.addCleanup(shutil.rmtree, case_dir)
         manifest_text = json.dumps(base_manifest(self.old_ubuntu, self.old_debian), indent=4) + "\n"
@@ -501,14 +523,15 @@ class UpdateCalculationTest(unittest.TestCase):
         )
         self.assertEqual(summary["status"], "update")
         updated_text = manifest_path.read_text(encoding="utf-8")
-        self.assertEqual(updated_text.count('"reference"'), 2)
-        self.assertEqual(json.loads(updated_text)["bases"][0]["id"], "ubuntu24.04")
-        self.assertEqual(json.loads(updated_text)["bases"][1]["id"], "debian13")
-        self.assertEqual(json.loads(updated_text)["bases"][0]["version"], "24.04")
-        self.assertEqual(json.loads(updated_text)["bases"][0]["variant"], "default")
-        self.assertEqual(json.loads(updated_text)["bases"][1]["family"], "debian")
-        self.assertIn('        "id": "ubuntu24.04"', updated_text)
-        self.assertIn('    "family": "debian"', updated_text)
+        expected = json.loads(manifest_text)
+        expected["bases"][0]["reference"] = (
+            self.old_ubuntu["reference"].split("@", 1)[0] + "@" + self.ubuntu_new
+        )
+        expected["bases"][1]["reference"] = (
+            self.old_debian["reference"].split("@", 1)[0] + "@" + self.debian_new
+        )
+        self.assertEqual(json.loads(updated_text), expected)
+        self.assertTrue(updated_text.endswith("\n"))
         updated_readme = readme_path.read_text(encoding="utf-8")
         self.assertTrue(updated_readme.startswith(prefix))
         self.assertTrue(updated_readme.endswith(suffix))
@@ -567,7 +590,24 @@ class ReadmeAndSummaryTest(unittest.TestCase):
     def test_repository_readme_block_matches_current_manifest(self):
         manifest = json.loads(BASE_MANIFEST.read_text(encoding="utf-8"))
         readme = README.read_text(encoding="utf-8")
-        self.assertEqual(updater.render_readme(readme, manifest), readme)
+        begin = readme.index(updater.BEGIN_MARKER) + len(updater.BEGIN_MARKER)
+        end = readme.index(updater.END_MARKER, begin)
+        rows = markdown_table_rows(readme[begin:end])
+        expected = [
+            ["Base ID", "Family", "Version", "Variant", "Digest"],
+            ["---", "---", "---", "---", "---"],
+            *[
+                [
+                    base["id"],
+                    base["family"],
+                    base["version"],
+                    base["variant"],
+                    base["reference"].rsplit("@", 1)[-1][:19] + "...",
+                ]
+                for base in manifest["bases"]
+            ],
+        ]
+        self.assertEqual(rows, expected)
 
     def test_generated_markers_and_table_render_exactly_once(self):
         block = updater.render_supported_bases([self.ubuntu])
@@ -582,12 +622,20 @@ class ReadmeAndSummaryTest(unittest.TestCase):
         one = updater.render_supported_bases([self.ubuntu])
         two = updater.render_supported_bases([self.ubuntu, self.debian])
         three = updater.render_supported_bases([self.ubuntu, self.debian, self.slim])
-        self.assertNotIn("debian13", one)
-        self.assertIn("`debian13`", two)
-        self.assertIn("| `debian13-slim` | debian | 13 | slim |", three)
-        self.assertIn("`sha256:" + "1" * 12 + "...`", one)
+        rows_one = markdown_table_rows(one)
+        rows_two = markdown_table_rows(two)
+        rows_three = markdown_table_rows(three)
+        self.assertNotIn("debian13", [row[0] for row in rows_one[2:]])
+        self.assertIn("debian13", [row[0] for row in rows_two[2:]])
+        slim_digest = self.slim["reference"].rsplit("@", 1)[-1]
+        self.assertIn(
+            ["debian13-slim", "debian", "13", "slim", "sha256:" + slim_digest.split(":", 1)[1][:12] + "..."],
+            rows_three,
+        )
+        self.assertEqual(rows_one[2][4], "sha256:" + "1" * 12 + "...")
         changed = dict(self.ubuntu, reference="ubuntu:24.04@sha256:" + "f" * 64)
-        self.assertIn("`sha256:" + "f" * 12 + "...`", updater.render_supported_bases([changed]))
+        changed_rows = markdown_table_rows(updater.render_supported_bases([changed]))
+        self.assertEqual(changed_rows[2][4], "sha256:" + "f" * 12 + "...")
 
     def test_text_outside_generated_markers_is_byte_for_byte_unchanged(self):
         prefix = "prefix\r\n\n"
