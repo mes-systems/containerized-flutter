@@ -526,7 +526,10 @@ class WorkflowContractsTest < Test::Unit::TestCase
       "BUILD_TAG" => "3.47.3-ubuntu24.04-#{BASE_DIGEST[0, 12]}-g123456789abc",
       "CANONICAL_TAG" => "3.47.3-ubuntu24.04-#{BASE_DIGEST[0, 12]}",
     }
-    expressions = {"matrix.base_reference" => "ubuntu:24.04@sha256:#{BASE_DIGEST}"}
+    expressions = {
+      "steps.build.outputs.digest" => "sha256:#{BUILD_DIGEST}",
+      "matrix.base_reference" => "ubuntu:24.04@sha256:#{BASE_DIGEST}",
+    }
     result, stderr, = run_step(step, env: environment, expressions: expressions)
     assert_not_equal(0, result.exitstatus, stderr)
     calls = File.readlines(log, chomp: true).map { |line| JSON.parse(line) }
