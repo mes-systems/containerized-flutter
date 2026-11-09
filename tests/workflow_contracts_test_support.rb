@@ -232,13 +232,13 @@ module WorkflowContractTestSupport
     git!(["-C", directory, "config", "user.email", "contract-test@example.invalid"])
     File.write(File.join(directory, "README.md"), "fixture baseline\n")
     git!(["-C", directory, "add", "README.md", "scripts/classify-changes.sh"])
-    git!(["-C", directory, "commit", "--quiet", "-m", "baseline"])
+    git!(["-C", directory, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "baseline"])
     base_sha = git!(["-C", directory, "rev-parse", "HEAD"]).strip
     path = File.join(directory, changed_path)
     FileUtils.mkdir_p(File.dirname(path))
     File.write(path, "fixture change\n")
     git!(["-C", directory, "add", changed_path])
-    git!(["-C", directory, "commit", "--quiet", "-m", "change #{changed_path}"])
+    git!(["-C", directory, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "change #{changed_path}"])
     head_sha = git!(["-C", directory, "rev-parse", "HEAD"]).strip
     {directory: directory, base_sha: base_sha, head_sha: head_sha}
   end
@@ -247,11 +247,39 @@ end
 class WorkflowContractsTest
   include WorkflowContractTestSupport
 
+  def test_watcher_fixture_materializes_main_when_source_checkout_is_detached
+    fixture = File.join(@temporary_directory, "detached-watcher-source")
+    source_remote = File.join(fixture, "source.git")
+    source_checkout = File.join(fixture, "source")
+    seed = File.join(fixture, "main.git")
+    checkout = File.join(fixture, "repo")
+    FileUtils.mkdir_p(fixture)
+    git!(["init", "--bare", "--initial-branch=main", source_remote])
+    git!([
+      "--git-dir", source_remote, "fetch", "--quiet", "--no-tags", ROOT,
+      "refs/remotes/origin/main:refs/heads/main",
+    ])
+    git!(["clone", "--shared", "--quiet", "--no-checkout", source_remote, source_checkout])
+    git!(["-C", source_checkout, "checkout", "--quiet", "--detach", "refs/remotes/origin/main"])
+    git!(["-C", source_checkout, "branch", "-D", "main"])
+    assert_equal("HEAD", git!(["-C", source_checkout, "rev-parse", "--abbrev-ref", "HEAD"]).strip)
+    main_branch = Open3.capture3("git", "-C", source_checkout, "show-ref", "--verify", "--quiet", "refs/heads/main").last
+    assert_equal(1, main_branch.exitstatus, "source checkout must not have a local main branch")
+
+    main_sha = materialize_watcher_main(source_checkout, seed, checkout)
+    assert_equal(
+      main_sha,
+      git!(["-C", checkout, "rev-parse", "HEAD"]).strip,
+      "isolated watcher checkout must start at the origin/main commit",
+    )
+  end
+
   def test_github_watcher_commit_is_verified_before_compare_and_swap_update
     ["flutter-release-watch", "base-image-watch"].each do |name|
       outcome = run_watcher_commit(name)
       assert_equal(0, outcome.fetch(:result).exitstatus, outcome.fetch(:result).stderr)
       calls = outcome.fetch(:calls)
+      assert_no_pull_request_merge(calls)
       create_call = calls.find { |call| call.dig("input", "query").to_s.include?("createCommitOnBranch") }
       update_call = calls.find { |call| call.dig("input", "query").to_s.include?("updateRefs") }
       assert_not_nil(create_call)
@@ -281,6 +309,11 @@ class WorkflowContractsTest
       assert(calls.any? { |call| call.fetch("args").include?("--method") && call.fetch("args").include?("DELETE") })
       assert_equal(outcome.fetch(:main_sha), outcome.fetch(:head_after))
       assert_equal("", outcome.fetch(:remote_refs))
+      forbidden_git_calls = outcome.fetch(:git_calls).select do |arguments|
+        %w[add commit push].include?(arguments.first) ||
+          (arguments.first == "config" && %w[user.name user.email].include?(arguments[1]))
+      end
+      assert_equal([], forbidden_git_calls, "watcher must create signed commits through GitHub without local Git publication")
     end
   end
 
@@ -345,21 +378,25 @@ class WorkflowContractsTest
       created = run_maintenance_step(name, "Create or update watcher pull request", {"GH_PR_NUMBER" => ""})
       assert_equal(0, created.fetch(:result).exitstatus, created.fetch(:result).stderr)
       assert(created.fetch(:calls).any? { |call| call.fetch("args")[0, 2] == ["pr", "create"] })
+      assert_no_pull_request_merge(created.fetch(:calls))
 
       updated = run_maintenance_step(name, "Create or update watcher pull request", {"GH_PR_NUMBER" => "17"})
       assert_equal(0, updated.fetch(:result).exitstatus, updated.fetch(:result).stderr)
       assert(updated.fetch(:calls).any? { |call| call.fetch("args")[0, 2] == ["pr", "edit"] })
+      assert_no_pull_request_merge(updated.fetch(:calls))
 
       anomaly_title = workflow(name).fetch("env").fetch("ANOMALY_TITLE")
       issue = run_maintenance_step(name, "Create or update deduplicated anomaly issue", {"GH_ISSUES_JSON" => "[]"})
       assert_equal(0, issue.fetch(:result).exitstatus, issue.fetch(:result).stderr)
       assert(issue.fetch(:calls).any? { |call| call.fetch("args")[0, 2] == ["issue", "create"] })
+      assert_no_pull_request_merge(issue.fetch(:calls))
       existing_issue = JSON.generate([{"number" => 9, "title" => anomaly_title}])
       issue = run_maintenance_step(
         name, "Create or update deduplicated anomaly issue", {"GH_ISSUES_JSON" => existing_issue},
       )
       assert_equal(0, issue.fetch(:result).exitstatus, issue.fetch(:result).stderr)
       assert(issue.fetch(:calls).any? { |call| call.fetch("args")[0, 2] == ["issue", "edit"] })
+      assert_no_pull_request_merge(issue.fetch(:calls))
     end
 
     reconcile = step_named(workflow("base-image-watch"), "watch", "Reconcile obsolete watcher pull request")
@@ -371,24 +408,41 @@ class WorkflowContractsTest
     assert_equal(0, result.fetch(:result).exitstatus, result.fetch(:result).stderr)
     assert(result.fetch(:calls).any? { |call| call.fetch("args")[0, 2] == ["pr", "comment"] })
     assert(result.fetch(:calls).any? { |call| call.fetch("args")[0, 2] == ["pr", "close"] })
-    assert_nil(result.fetch(:calls).find { |call| call.fetch("args").include?("merge") })
+    assert_no_pull_request_merge(result.fetch(:calls))
     assert_include(reconcile.fetch("if"), "security_anomaly")
     assert_include(reconcile.fetch("if"), "unchanged")
   end
 
+  def assert_no_pull_request_merge(calls)
+    assert_nil(calls.find { |call| call.fetch("args")[0, 2] == ["pr", "merge"] })
+  end
+
   private
+
+  def materialize_watcher_main(source_repo, seed_repo, checkout)
+    git!(["init", "--bare", seed_repo])
+    source_sha = git!(["-C", source_repo, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}"]).strip
+    git!([
+      "--git-dir", seed_repo, "fetch", "--quiet", "--no-tags", source_repo,
+      "refs/remotes/origin/main:refs/heads/main",
+    ])
+    main_sha = git!(["--git-dir", seed_repo, "rev-parse", "--verify", "refs/heads/main^{commit}"]).strip
+    assert_equal(source_sha, main_sha, "isolated checkout must use the source origin/main commit")
+    git!(["clone", "--shared", "--single-branch", "--quiet", "--branch", "main", seed_repo, checkout])
+    main_sha
+  end
 
   def run_watcher_commit(name, existing: false, environment: {})
     omit("watcher workflow uses Bash 4+ lowercase parameter expansion") unless @supports_bash_case_conversion
     @watcher_counter += 1
     fixture = File.join(@temporary_directory, "watcher-#{@watcher_counter}")
     repo = File.join(fixture, "repo")
+    seed = File.join(fixture, "main.git")
     remote = File.join(fixture, "remote.git")
     FileUtils.mkdir_p(fixture)
     git!(["init", "--bare", "--initial-branch=main", remote])
-    git!(["clone", "--shared", "--single-branch", "--quiet", "--branch", "main", ROOT, repo])
+    main_sha = materialize_watcher_main(ROOT, seed, repo)
     git!(["-C", repo, "remote", "set-url", "origin", remote])
-    main_sha = git!(["-C", repo, "rev-parse", "refs/remotes/origin/main^{commit}"]).strip
     branch = workflow(name).fetch("env").fetch("WATCHER_BRANCH")
     if existing
       git!(["-C", repo, "update-ref", "refs/remotes/origin/#{branch}", main_sha])
@@ -408,14 +462,29 @@ class WorkflowContractsTest
       "GH_STATE" => state_path, "MAIN_SHA" => main_sha, "CURRENT_REMOTE_SHA" => main_sha,
       "COMMIT_OID" => COMMIT_OID, "GH_EXISTING_VERIFIED" => "false", "GH_COMMIT_VERIFIED" => "true",
     }.merge(environment)
+    git_directory = File.join(fixture, "git-bin")
+    FileUtils.mkdir_p(git_directory)
+    git_log = File.join(fixture, "git.jsonl")
+    real_git = ENV.fetch("PATH").split(File::PATH_SEPARATOR)
+      .map { |directory| File.join(directory, "git") }
+      .find { |path| File.file?(path) && File.executable?(path) }
+    raise "git executable not found in PATH" unless real_git
+    write_executable(File.join(git_directory, "git"), <<~'RUBY')
+      #!/usr/bin/env ruby
+      require "json"
+      File.open(ENV.fetch("GIT_LOG"), "a") { |handle| handle.puts(JSON.generate(ARGV)) }
+      exec(ENV.fetch("REAL_GIT"), *ARGV)
+    RUBY
+    base_env.merge!("GIT_LOG" => git_log, "REAL_GIT" => real_git)
     step = step_named(workflow(name), "watch", "Create and verify GitHub-signed watcher commit")
-    status, stderr, stdout = run_step(step, cwd: repo, env: base_env)
+    status, stderr, stdout = run_step(step, cwd: repo, env: base_env, executable_directory: git_directory)
     calls = File.exist?(gh_log) ? File.readlines(gh_log, chomp: true).map { |line| JSON.parse(line) } : []
+    git_calls = File.exist?(git_log) ? File.readlines(git_log, chomp: true).map { |line| JSON.parse(line) } : []
     head_after = git!(["-C", repo, "rev-parse", "HEAD"]).strip
     remote_refs = git!(["--git-dir", remote, "for-each-ref"]).strip
     {result: Struct.new(:exitstatus, :stdout, :stderr).new(status.exitstatus, stdout, stderr),
      calls: calls, main_sha: main_sha, head_before: head_before, head_after: head_after,
-     remote_refs: remote_refs, repo: repo}
+     remote_refs: remote_refs, git_calls: git_calls, repo: repo}
   end
 
   def run_maintenance_step(name, step_name, overrides = {}, expressions: {})

@@ -52,7 +52,7 @@ class WorkflowContractsTest < Test::Unit::TestCase
       raise("workflow step not found: #{name}")
   end
 
-  def run_step(step, cwd: ROOT, env: {}, expressions: {})
+  def run_step(step, cwd: ROOT, env: {}, expressions: {}, executable_directory: nil)
     script = step.fetch("run")
     script = script.gsub(/\$\{\{\s*([^}]+?)\s*\}\}/) do |expression|
       expressions.fetch(Regexp.last_match(1).strip) do
@@ -60,8 +60,9 @@ class WorkflowContractsTest < Test::Unit::TestCase
       end
     end
     assert_not_match(/\$\{\{/, script, "workflow expression was not resolved in test fixture")
+    path = [executable_directory, @bin_directory, ENV.fetch("PATH", "")].compact.join(File::PATH_SEPARATOR)
     stdout, stderr, status = Open3.capture3(
-      {"PATH" => "#{@bin_directory}:#{ENV.fetch('PATH', '')}"}.merge(env.transform_values(&:to_s)),
+      {"PATH" => path}.merge(env.transform_values(&:to_s)),
       "bash", "-e", "-o", "pipefail", "-c", script, chdir: cwd,
     )
     [status, stderr, stdout]
@@ -80,6 +81,19 @@ class WorkflowContractsTest < Test::Unit::TestCase
 
   def markdown_link_targets(markdown)
     markdown.scan(/\[[^\]]+\]\(([^)]+)\)/).flatten
+  end
+
+  def workflow_secret_references(value)
+    case value
+    when Hash
+      value.values.flat_map { |child| workflow_secret_references(child) }
+    when Array
+      value.flat_map { |child| workflow_secret_references(child) }
+    when String
+      value.scan(/\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}/).flatten
+    else
+      []
+    end
   end
 
   def test_all_actions_are_pinned_to_full_commit_identifiers
@@ -137,13 +151,18 @@ class WorkflowContractsTest < Test::Unit::TestCase
       )
       assert_match(/matrix\.base_reference/, build_args.assoc("BASE_IMAGE").last)
       assert_not_match(/secrets\./, build_args.map(&:last).join("\n"))
-      docker_setup = steps.find { |step| step["uses"].to_s.start_with?("docker/setup-docker-action@") }
-      assert_not_nil(docker_setup)
+      docker_setup_index = step_position(steps) { |step| step["uses"].to_s.start_with?("docker/setup-docker-action@") }
+      docker_setup = steps.fetch(docker_setup_index)
       assert_equal("v29.8.0", docker_setup.fetch("with").fetch("version"))
       assert_equal(true, JSON.parse(docker_setup.fetch("with").fetch("daemon-config")).dig("features", "containerd-snapshotter"))
 
+      docker_verify_index = step_position(steps) { |step| step["name"] == "Verify containerd image store" }
+      buildx_index = step_position(steps) { |step| step["uses"].to_s.start_with?("docker/setup-buildx-action@") }
       verifier_index = step_position(steps) { |step| step["env"].is_a?(Hash) && step["env"].key?("DOCKER_SOCKET") }
       smoke_index = step_position(steps) { |step| step["name"] == "Smoke test image" }
+      assert_operator(docker_setup_index, :<, docker_verify_index)
+      assert_operator(docker_verify_index, :<, buildx_index)
+      assert_operator(buildx_index, :<, build_index)
       assert_operator(build_index, :<, verifier_index)
       assert_operator(verifier_index, :<, smoke_index)
       assert_equal("always()", step_named(document, job_name, "Remove tested image").fetch("if"))
@@ -171,6 +190,7 @@ class WorkflowContractsTest < Test::Unit::TestCase
     {"flutter-release-watch" => "30 3 * * *", "base-image-watch" => "0 3 * * *"}.each do |name, cron|
       document = workflow(name)
       events = workflow_events(document)
+      assert_equal(%w[schedule workflow_dispatch].sort, events.keys.sort)
       assert_equal(cron, events.fetch("schedule").first.fetch("cron"))
       assert_include(events.keys, "workflow_dispatch")
       assert_equal({"contents" => "read"}, document.fetch("permissions"))
@@ -181,25 +201,39 @@ class WorkflowContractsTest < Test::Unit::TestCase
       assert_equal(false, checkout.fetch("with").fetch("persist-credentials"))
       token = job_steps(document, "watch").find { |step| step["id"] == "app-token" }
       assert_not_nil(token)
+      assert_include(token.fetch("uses"), "actions/create-github-app-token@")
+      assert_equal("${{ vars.FLUTTER_WATCHER_CLIENT_ID }}", token.fetch("with").fetch("client-id"))
+      assert_equal("${{ secrets.FLUTTER_WATCHER_PRIVATE_KEY }}", token.fetch("with").fetch("private-key"))
+      assert_equal("containerized-flutter", token.fetch("with").fetch("repositories"))
+      assert_equal(
+        %w[permission-contents permission-issues permission-metadata permission-pull-requests],
+        token.fetch("with").keys.grep(/\Apermission-/).sort,
+      )
       %w[contents pull-requests issues].each { |scope| assert_equal("write", token.fetch("with").fetch("permission-#{scope}")) }
       assert_equal("read", token.fetch("with").fetch("permission-metadata"))
+      assert_equal(["FLUTTER_WATCHER_PRIVATE_KEY"], workflow_secret_references(document).uniq.sort)
       assert_include(job_steps(document, "watch").map { |step| step["run"].to_s }.join("\n"), "tests/scripts_test.sh")
     end
 
     scorecard = workflow("scorecard")
     events = workflow_events(scorecard)
+    assert_equal(%w[push schedule], events.keys.sort)
     assert_equal(["main"], events.fetch("push").fetch("branches"))
     assert_include(events.keys, "schedule")
-    assert_not_include(events.keys, "pull_request")
+    assert_equal([], workflow_secret_references(scorecard))
     assert_equal({"contents" => "read"}, scorecard.fetch("permissions"))
     assert_equal(
       {"contents" => "read", "security-events" => "write", "id-token" => "write"},
       scorecard.fetch("jobs").fetch("analysis").fetch("permissions"),
     )
     scorecard_steps = job_steps(scorecard, "analysis")
+    scorecard_checkout = scorecard_steps.find { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+    assert_equal(false, scorecard_checkout.fetch("with").fetch("persist-credentials"))
     analysis = scorecard_steps.find { |step| step["uses"].to_s.start_with?("ossf/scorecard-action@") }
     assert_equal("sarif", analysis.fetch("with").fetch("results_format"))
     assert_equal(true, analysis.fetch("with").fetch("publish_results"))
+    assert_not_include(analysis.fetch("with", {}).keys, "repo_token")
+    assert(scorecard_steps.none? { |step| step.fetch("env", {}).key?("SCORECARD_TOKEN") })
     upload = scorecard_steps.find { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
     assert_equal(5, upload.fetch("with").fetch("retention-days"))
     assert(scorecard_steps.any? { |step| step["uses"].to_s.start_with?("github/codeql-action/upload-sarif@") })
@@ -347,10 +381,29 @@ class WorkflowContractsTest < Test::Unit::TestCase
   end
 
   def test_emitted_attestation_verifier_accepts_matching_evidence_and_rejects_wrong_base_digest
+    invalid_attestation_cases = [
+      ["non-array response", ->(documents) { documents.first }],
+      ["missing SLSA evidence", ->(documents) { documents.reject { |item| item["PredicateType"] == SLSA_TYPE } }],
+      ["SLSA statement shape", ->(documents) { documents[0]["Statement"] = []; documents }],
+      ["SLSA statement predicate type", ->(documents) { documents[0]["Statement"]["predicateType"] = "unexpected"; documents }],
+      ["BuildKit definition shape", ->(documents) { documents[0]["Statement"]["predicate"]["buildDefinition"] = []; documents }],
+      ["BuildKit run details shape", ->(documents) { documents[0]["Statement"]["predicate"]["runDetails"] = []; documents }],
+      ["BuildKit type", ->(documents) { documents[0]["Statement"]["predicate"]["buildDefinition"]["buildType"] = "unexpected"; documents }],
+      ["base dependency list", ->(documents) { documents[0]["Statement"]["predicate"]["buildDefinition"]["resolvedDependencies"] = []; documents }],
+      ["base digest mismatch", ->(documents) { documents[0]["Statement"]["predicate"]["buildDefinition"]["resolvedDependencies"][0]["digest"]["sha256"] = "d" * 64; documents }],
+      ["BuildKit definition contents", ->(documents) { documents[0]["Statement"]["predicate"]["buildDefinition"]["internalParameters"]["buildConfig"]["llbDefinition"] = []; documents }],
+      ["incomplete build request", ->(documents) { documents[0]["Statement"]["predicate"]["runDetails"]["metadata"]["buildkit_completeness"]["request"] = false; documents }],
+      ["missing SPDX evidence", ->(documents) { documents.reject { |item| item["PredicateType"] == SPDX_TYPE } }],
+      ["SPDX statement shape", ->(documents) { documents[1]["Statement"] = []; documents }],
+      ["SPDX statement predicate type", ->(documents) { documents[1]["Statement"]["predicateType"] = "unexpected"; documents }],
+      ["SPDX document identity", ->(documents) { documents[1]["Statement"]["predicate"]["SPDXID"] = "SPDXRef-OTHER"; documents }],
+      ["SPDX version", ->(documents) { documents[1]["Statement"]["predicate"].delete("spdxVersion"); documents }],
+    ]
+
     ["ci", "publish"].each do |name|
       job_name = name == "ci" ? "build" : "publish"
       step = job_steps(workflow(name), job_name).find { |candidate| candidate["env"].is_a?(Hash) && candidate["env"].key?("DOCKER_SOCKET") }
-      socket_path = "/tmp/cf-#{Process.pid}-#{name}.sock"
+      socket_path = File.join(@temporary_directory, "#{name[0]}.sock")
       socket = UNIXServer.new(socket_path)
       begin
         valid_file = write_json("attestation-#{name}.json", attestation_documents(BASE_DIGEST))
@@ -370,9 +423,17 @@ class WorkflowContractsTest < Test::Unit::TestCase
         assert_include(curl_args, "--unix-socket")
         assert_include(curl_args, socket_path)
         assert_include(curl_args, "--get")
-        invalid_file = write_json("attestation-wrong-base-#{name}.json", attestation_documents("d" * 64))
-        result, = run_step(step, env: shared_env.merge("ATTESTATION_FILE" => invalid_file), expressions: expressions)
-        assert_not_equal(0, result.exitstatus)
+        invalid_attestation_cases.each_with_index do |(label, mutate), index|
+          invalid_file = write_json(
+            "attestation-invalid-#{name}-#{index}.json",
+            mutate.call(attestation_documents(BASE_DIGEST)),
+          )
+          result, stderr, = run_step(step, env: shared_env.merge("ATTESTATION_FILE" => invalid_file), expressions: expressions)
+          assert_not_equal(0, result.exitstatus, "#{name} accepted invalid #{label}: #{stderr}")
+        end
+        invalid_base = expressions.merge("matrix.base_reference" => "ubuntu:24.04@sha256:invalid")
+        result, stderr, = run_step(step, env: shared_env, expressions: invalid_base)
+        assert_not_equal(0, result.exitstatus, "#{name} accepted an invalid base reference: #{stderr}")
       ensure
         socket.close
         FileUtils.rm_f(socket_path)
@@ -408,19 +469,69 @@ class WorkflowContractsTest < Test::Unit::TestCase
     )
     assert_equal("sha256:#{BUILD_DIGEST}", output_values(output).fetch("digest"))
 
-    negative_log = File.join(@temporary_directory, "docker-push-rejected.jsonl")
-    result, stderr, stdout = run_step(
-      step,
-      env: environment.merge(
-        "DOCKER_LOG" => negative_log,
-        "PROVENANCE_FILE" => write_json("wrong-provenance.json", provenance_document("d" * 64)),
-      ),
-      expressions: expressions,
-    )
-    assert_not_equal(0, result.exitstatus, "stdout=#{stdout.inspect} stderr=#{stderr.inspect} docker=#{File.read(negative_log)}")
-    negative_pushes = File.readlines(negative_log, chomp: true).map { |line| JSON.parse(line) }
-      .select { |args| args.first == "push" }.map(&:last)
-    assert_equal(["#{environment.fetch('IMAGE_NAME')}:#{environment.fetch('BUILD_TAG')}"], negative_pushes)
+    invalid_publication_cases = [
+      ["BuildKit type", ->(provenance, _sbom, _env) { provenance["buildDefinition"]["buildType"] = "unexpected" }],
+      ["Build definition shape", ->(provenance, _sbom, _env) { provenance["buildDefinition"] = nil }],
+      ["run details shape", ->(provenance, _sbom, _env) { provenance["runDetails"] = nil }],
+      ["base dependency list", ->(provenance, _sbom, _env) { provenance["buildDefinition"]["resolvedDependencies"] = [] }],
+      ["base digest mismatch", ->(provenance, _sbom, _env) { provenance["buildDefinition"]["resolvedDependencies"][0]["digest"]["sha256"] = "d" * 64 }],
+      ["BuildKit definition contents", ->(provenance, _sbom, _env) { provenance["buildDefinition"]["internalParameters"]["buildConfig"]["llbDefinition"] = [] }],
+      ["incomplete build request", ->(provenance, _sbom, _env) { provenance["runDetails"]["metadata"]["buildkit_completeness"]["request"] = false }],
+      ["SPDX document identity", ->(_provenance, sbom, _env) { sbom["SPDXID"] = "SPDXRef-OTHER" }],
+      ["SPDX version", ->(_provenance, sbom, _env) { sbom.delete("spdxVersion") }],
+    ]
+
+    invalid_publication_cases.each_with_index do |(label, mutate), index|
+      bad_provenance = JSON.parse(JSON.generate(provenance_document(BASE_DIGEST)))
+      bad_sbom = {"SPDXID" => "SPDXRef-DOCUMENT", "spdxVersion" => "SPDX-2.3"}
+      bad_environment = environment.dup
+      mutate.call(bad_provenance, bad_sbom, bad_environment)
+      negative_log = File.join(@temporary_directory, "docker-push-rejected-#{index}.jsonl")
+      result, stderr, stdout = run_step(
+        step,
+        env: bad_environment.merge(
+          "DOCKER_LOG" => negative_log,
+          "PROVENANCE_FILE" => write_json("wrong-provenance-#{index}.json", bad_provenance),
+          "SBOM_FILE" => write_json("wrong-sbom-#{index}.json", bad_sbom),
+        ),
+        expressions: expressions,
+      )
+      assert_not_equal(
+        0,
+        result.exitstatus,
+        "accepted invalid #{label}: registry=#{bad_environment.fetch('REGISTRY_DIGEST')} " \
+        "stdout=#{stdout.inspect} stderr=#{stderr.inspect} docker=#{File.read(negative_log)}",
+      )
+      negative_pushes = File.readlines(negative_log, chomp: true).map { |line| JSON.parse(line) }
+        .select { |args| args.first == "push" }.map(&:last)
+      assert_equal(
+        ["#{environment.fetch('IMAGE_NAME')}:#{environment.fetch('BUILD_TAG')}"],
+        negative_pushes,
+        "canonical tag was updated despite invalid #{label}",
+      )
+    end
+  end
+
+  def test_publish_step_rejects_a_registry_digest_with_invalid_format
+    omit("workflow digest format guard requires Bash 4+ regex behavior") unless @supports_bash_case_conversion
+    step = job_steps(workflow("publish"), "publish").find { |candidate| candidate["id"] == "push" }
+    provenance = write_json("invalid-digest-provenance.json", provenance_document(BASE_DIGEST))
+    sbom = write_json("invalid-digest-sbom.json", {"SPDXID" => "SPDXRef-DOCUMENT", "spdxVersion" => "SPDX-2.3"})
+    output = File.join(@temporary_directory, "invalid-digest-output.txt")
+    log = File.join(@temporary_directory, "invalid-digest-docker.jsonl")
+    environment = {
+      "DOCKER_MODE" => "publish", "DOCKER_LOG" => log, "REGISTRY_DIGEST" => "not-a-digest",
+      "PROVENANCE_FILE" => provenance, "SBOM_FILE" => sbom, "GITHUB_OUTPUT" => output,
+      "IMAGE_NAME" => "ghcr.io/mes-systems/containerized-flutter",
+      "BUILD_TAG" => "3.47.3-ubuntu24.04-#{BASE_DIGEST[0, 12]}-g123456789abc",
+      "CANONICAL_TAG" => "3.47.3-ubuntu24.04-#{BASE_DIGEST[0, 12]}",
+    }
+    expressions = {"matrix.base_reference" => "ubuntu:24.04@sha256:#{BASE_DIGEST}"}
+    result, stderr, = run_step(step, env: environment, expressions: expressions)
+    assert_not_equal(0, result.exitstatus, stderr)
+    calls = File.readlines(log, chomp: true).map { |line| JSON.parse(line) }
+    pushes = calls.select { |args| args.first == "push" }.map(&:last)
+    assert_equal(["#{environment.fetch('IMAGE_NAME')}:#{environment.fetch('BUILD_TAG')}"], pushes)
   end
 
   def test_image_cleanup_removes_tested_tags_and_fails_if_any_image_remains
